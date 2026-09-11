@@ -166,3 +166,7 @@ $RECYCLE.BIN/
 
 # Mac desktop service store files
 .DS_Store
+
+# Portable/published CLI bundle (self-contained binary, ~80MB - a build artifact, not source)
+DanbooruDownloader-Portable-macOS/
+*.zip
