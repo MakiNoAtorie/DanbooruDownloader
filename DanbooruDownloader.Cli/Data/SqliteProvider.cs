@@ -58,15 +58,34 @@ CREATE TABLE IF NOT EXISTS tracked_artists (
             var cmd = connection.CreateCommand();
             cmd.CommandText = CREATE_SQL + ";" + CREATE_TRACKED_ARTISTS_SQL;
             var result = cmd.ExecuteNonQuery();
+
+            MigrateAddMd5Column(connection);
+
             return result > -1;
         }
 
+        // Lightweight migration for DBs created before MD5-based cross-provider dedup was
+        // added: CREATE TABLE IF NOT EXISTS won't add a column to an existing table, so add
+        // it explicitly if missing (a fresh DB already has it via CREATE_SQL below).
+        private static void MigrateAddMd5Column(SqliteConnection connection)
+        {
+            var checkCmd = connection.CreateCommand();
+            checkCmd.CommandText = "SELECT COUNT(*) FROM pragma_table_info('downloaded_files') WHERE name = 'md5'";
+            var hasColumn = Convert.ToInt64(checkCmd.ExecuteScalar()) > 0;
+            if (!hasColumn)
+            {
+                var alterCmd = connection.CreateCommand();
+                alterCmd.CommandText = "ALTER TABLE downloaded_files ADD COLUMN md5 TEXT";
+                alterCmd.ExecuteNonQuery();
+            }
+        }
+
         private const string INSERT_SQL = @"
-INSERT INTO downloaded_files (provider_name, post_id, filename, path)
-VALUES (@provider_name, @post_id, @filename, @path)
+INSERT INTO downloaded_files (provider_name, post_id, filename, path, md5)
+VALUES (@provider_name, @post_id, @filename, @path, @md5)
 ";
 
-        public bool Insert(string providerName, string postId, string filename, string path)
+        public bool Insert(string providerName, string postId, string filename, string path, string md5 = null)
         {
             using var connection = new SqliteConnection(connectionString);
             connection.Open();
@@ -77,12 +96,13 @@ VALUES (@provider_name, @post_id, @filename, @path)
             cmd.Parameters.AddWithValue("@post_id", postId);
             cmd.Parameters.AddWithValue("@filename", filename);
             cmd.Parameters.AddWithValue("@path", path);
+            cmd.Parameters.AddWithValue("@md5", (object)md5 ?? DBNull.Value);
             var result = cmd.ExecuteNonQuery();
             return result > -1;
         }
 
         private const string SELECT_SQL = @"
-SELECT * FROM downloaded_files
+SELECT id, provider_name, post_id, filename, path, download_timestamp, md5 FROM downloaded_files
 WHERE provider_name = @provider_name and post_id = @post_id
 ";
 
@@ -100,17 +120,49 @@ WHERE provider_name = @provider_name and post_id = @post_id
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
             {
-                result.Add(new DownloadedFile
-                {
-                    Id = reader.GetInt32(0),
-                    ProviderName = reader.GetString(1),
-                    PostId = reader.GetString(2),
-                    Filename = reader.GetString(3),
-                    Path = reader.GetString(4),
-                    Timestamp = DateTime.ParseExact(reader.GetString(5), "yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)
-                });
+                result.Add(ReadDownloadedFile(reader));
             }
             return result;
+        }
+
+        private const string SELECT_BY_MD5_SQL = @"
+SELECT id, provider_name, post_id, filename, path, download_timestamp, md5 FROM downloaded_files
+WHERE md5 = @md5 AND md5 IS NOT NULL AND md5 != ''
+LIMIT 1
+";
+
+        /// <summary>
+        /// Cross-provider dedup: the same artwork is often crossposted to multiple boards
+        /// with an identical file, so an MD5 match here (opt-in via --dedup-by-md5) means we
+        /// already have this exact image under a different provider/post-id.
+        /// </summary>
+        public DownloadedFile GetDownloadedFileByMd5(string md5)
+        {
+            if (string.IsNullOrWhiteSpace(md5)) return null;
+
+            using var connection = new SqliteConnection(connectionString);
+            connection.Open();
+
+            var cmd = connection.CreateCommand();
+            cmd.CommandText = SELECT_BY_MD5_SQL;
+            cmd.Parameters.AddWithValue("@md5", md5);
+
+            using var reader = cmd.ExecuteReader();
+            return reader.Read() ? ReadDownloadedFile(reader) : null;
+        }
+
+        private static DownloadedFile ReadDownloadedFile(SqliteDataReader reader)
+        {
+            return new DownloadedFile
+            {
+                Id = reader.GetInt32(0),
+                ProviderName = reader.GetString(1),
+                PostId = reader.GetString(2),
+                Filename = reader.GetString(3),
+                Path = reader.GetString(4),
+                Timestamp = DateTime.ParseExact(reader.GetString(5), "yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+                Md5 = reader.IsDBNull(6) ? null : reader.GetString(6),
+            };
         }
 
         private const string UPSERT_TRACKED_ARTIST_SQL = @"

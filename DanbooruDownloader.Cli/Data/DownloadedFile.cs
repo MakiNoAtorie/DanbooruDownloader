@@ -10,5 +10,6 @@ namespace DanbooruDownloader.Cli.Data
         public string Filename { get; set; }
         public string Path { get; set; }
         public DateTime Timestamp { get; set; }
+        public string Md5 { get; set; }
     }
 }

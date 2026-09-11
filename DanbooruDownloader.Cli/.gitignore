@@ -1,5 +1,6 @@
 downloads/
 artists/
+publish/
 *.db
 *.db-journal
 *.!tmp

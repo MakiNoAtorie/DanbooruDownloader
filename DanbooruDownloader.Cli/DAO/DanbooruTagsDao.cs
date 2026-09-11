@@ -71,6 +71,13 @@ namespace DanbooruDownloader.Cli.DAO
             return tags;
         }
 
+        public static void Save(string xmlTagFile, List<DanbooruTag> tags)
+        {
+            using StreamWriter s = File.CreateText(xmlTagFile);
+            var col = new DanbooruTagCollection { Tag = tags.ToArray() };
+            _ser.Serialize(s, col);
+        }
+
         private static DanbooruTagsDao _DefaultTagsDao;
 
         public static DanbooruTagsDao Instance
