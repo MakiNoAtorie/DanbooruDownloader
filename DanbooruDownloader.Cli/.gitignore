@@ -1,0 +1,6 @@
+downloads/
+artists/
+*.db
+*.db-journal
+*.!tmp
+Dump for *.txt

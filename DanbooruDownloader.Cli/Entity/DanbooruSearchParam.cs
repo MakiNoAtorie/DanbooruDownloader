@@ -1,0 +1,20 @@
+namespace DanbooruDownloader.Cli.Entity
+{
+    public class DanbooruSearchParam
+    {
+        public DanbooruProvider Provider { get; set; }
+
+        public string Tag { get; set; }
+        public int? Limit { get; set; }
+        public string Source { get; set; }
+        public int? Page { get; set; }
+
+        public string OrderBy { get; set; }
+        public string Rating { get; set; }
+        public bool IsNotRating { get; set; }
+
+        public DanbooruPostDaoOption Option { get; set; }
+
+        public string NextKey { get; set; }
+    }
+}
