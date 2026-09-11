@@ -16,16 +16,19 @@ namespace DanbooruDownloader.Cli.Interactive
     /// </summary>
     public static class InteractiveMenu
     {
-        // Asked once per session, then reused - re-prompting for these on every single
-        // action (there are 8+ menu actions that all need one or both) turned out to be
-        // real friction, and worse, a real bug: in testing, a "0" meant for a submenu's
-        // "Back" choice landed on one of these prompts instead and was used as a literal
-        // path, crashing with "Failed to read providers from 0: Could not find file...".
-        private static string _providersPath;
-        private static string _dbPath;
+        // These are internal bookkeeping files (the provider config, the dedup/tracking
+        // database), not a meaningful choice for someone using the menu - there's only ever
+        // one of each sitting next to the app, so asking about them on every action was pure
+        // friction (and the source of a real bug: a "0" meant for a submenu's "Back" choice
+        // could land on one of these prompts instead, crashing with "Failed to read providers
+        // from 0: Could not find file..."). Silently default instead of asking; anyone who
+        // genuinely needs a different path still has the flag-based commands (--providers,
+        // --db) for that.
+        private const string DefaultProvidersPath = "DanbooruProviderList.xml";
+        private const string DefaultDbPath = "downloaded.db";
 
-        private static string GetProvidersPath() => _providersPath ??= Prompt("Providers file", "DanbooruProviderList.xml");
-        private static string GetDbPath() => _dbPath ??= Prompt("Dedup/tracking DB", "downloaded.db");
+        private static string GetProvidersPath() => DefaultProvidersPath;
+        private static string GetDbPath() => DefaultDbPath;
 
         public static async Task<int> RunAsync()
         {
