@@ -20,10 +20,18 @@ namespace DanbooruDownloader.Cli
 
         public static async Task<int> Main(string[] args)
         {
-            if (args.Length == 0 || args[0] is "-h" or "--help")
+            // No args (e.g. a double-clicked launcher) drops into the numbered interactive
+            // menu instead of just dumping usage and exiting - --help still gives the full
+            // flag reference for scripting.
+            if (args.Length == 0)
+            {
+                return await Interactive.InteractiveMenu.RunAsync();
+            }
+
+            if (args[0] is "-h" or "--help")
             {
                 PrintUsage();
-                return args.Length == 0 ? 1 : 0;
+                return 0;
             }
 
             // "providers" and "cookie" take a positional sub-action (list/show/set) rather
@@ -93,6 +101,8 @@ namespace DanbooruDownloader.Cli
         private static void PrintUsage()
         {
             Console.WriteLine("""
+                danboo                  Interactive numbered menu (no flags needed)
+
                 danboo search   --provider <name> --tags "<tags>" [options]
                 danboo download --provider <name> --tags "<tags>" --output <dir> [options]
                 danboo batch    --jobs <file> --provider-names <p1,p2,...> --output <dir> [options]
@@ -189,7 +199,7 @@ namespace DanbooruDownloader.Cli
 
         // ---- shared: providers, search params, fetching, downloading ----
 
-        private static List<DanbooruProvider> LoadProviders(string providersPath, out string error)
+        internal static List<DanbooruProvider> LoadProviders(string providersPath, out string error)
         {
             error = null;
             try
@@ -203,7 +213,7 @@ namespace DanbooruDownloader.Cli
             }
         }
 
-        private static DanbooruProvider FindProvider(List<DanbooruProvider> providers, string name)
+        internal static DanbooruProvider FindProvider(List<DanbooruProvider> providers, string name)
         {
             return providers.FirstOrDefault(p => string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase));
         }
@@ -529,7 +539,7 @@ namespace DanbooruDownloader.Cli
 
         // ---- search ----
 
-        private static async Task<int> RunSearch(Dictionary<string, string> flags)
+        internal static async Task<int> RunSearch(Dictionary<string, string> flags)
         {
             var providersPath = flags.GetValueOrDefault("providers", "DanbooruProviderList.xml");
             var providerName = flags.GetValueOrDefault("provider");
@@ -580,7 +590,7 @@ namespace DanbooruDownloader.Cli
 
         // ---- download ----
 
-        private static async Task<int> RunDownload(Dictionary<string, string> flags)
+        internal static async Task<int> RunDownload(Dictionary<string, string> flags)
         {
             var providersPath = flags.GetValueOrDefault("providers", "DanbooruProviderList.xml");
             var providerName = flags.GetValueOrDefault("provider");
@@ -634,7 +644,7 @@ namespace DanbooruDownloader.Cli
 
         // ---- batch ----
 
-        private static async Task<int> RunBatch(Dictionary<string, string> flags)
+        internal static async Task<int> RunBatch(Dictionary<string, string> flags)
         {
             var jobsPath = flags.GetValueOrDefault("jobs");
             var providerNamesRaw = flags.GetValueOrDefault("provider-names");
@@ -733,7 +743,7 @@ namespace DanbooruDownloader.Cli
 
         // ---- providers ----
 
-        private static async Task<int> RunProviders(string[] rest)
+        internal static async Task<int> RunProviders(string[] rest)
         {
             var flags = ParseFlags(rest.Length > 1 ? rest[1..] : Array.Empty<string>());
             var providersPath = flags.GetValueOrDefault("providers", "DanbooruProviderList.xml");
@@ -813,7 +823,7 @@ namespace DanbooruDownloader.Cli
 
         // ---- tags ----
 
-        private static async Task<int> RunTagsDownload(Dictionary<string, string> flags)
+        internal static async Task<int> RunTagsDownload(Dictionary<string, string> flags)
         {
             var providersPath = flags.GetValueOrDefault("providers", "DanbooruProviderList.xml");
             var providerName = flags.GetValueOrDefault("provider");
@@ -862,7 +872,7 @@ namespace DanbooruDownloader.Cli
 
         // ---- cookie ----
 
-        private static int RunCookie(string[] rest)
+        internal static int RunCookie(string[] rest)
         {
             if (rest.Length < 3 || rest[0] != "set")
             {
@@ -894,7 +904,7 @@ namespace DanbooruDownloader.Cli
 
         // ---- artist (tracked gallery + refresh) ----
 
-        private static async Task<int> RunArtist(string action, Dictionary<string, string> flags)
+        internal static async Task<int> RunArtist(string action, Dictionary<string, string> flags)
         {
             var dbPath = flags.GetValueOrDefault("db", "downloaded.db");
             var db = new SqliteProvider(dbPath);
@@ -1051,7 +1061,7 @@ namespace DanbooruDownloader.Cli
         /// "artist refresh --all" on its own - since a refresh command you have to remember
         /// to run isn't actually automatic, this is the piece that makes it so.
         /// </summary>
-        private static int RunArtistSchedule(string action, Dictionary<string, string> flags)
+        internal static int RunArtistSchedule(string action, Dictionary<string, string> flags)
         {
             switch (action)
             {
