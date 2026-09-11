@@ -893,9 +893,15 @@ namespace DanbooruDownloader.Cli
             var provider = FindProvider(providers, providerName);
             if (provider == null) { Console.Error.WriteLine($"Provider '{providerName}' not found."); return 1; }
 
+            // Setting a cookie only does anything at request time if LoginType is actually
+            // Cookie - GetQueryUrl() only injects the cookie jar for that case. Previously
+            // this just warned and left the provider as-is (e.g. Anonymous), so the cookie
+            // silently never got used; since running "cookie set" is a clear signal the user
+            // wants cookie auth for this provider, switch it automatically instead.
             if (provider.LoginType is not (LoginType.Cookie or LoginType.CookieAlwaysAsk))
             {
-                Console.Error.WriteLine($"Warning: {provider.Name} has LoginType={provider.LoginType}, not Cookie - setting UserName anyway.");
+                Console.WriteLine($"Note: {provider.Name} was LoginType={provider.LoginType} - switching it to Cookie so this value actually gets used.");
+                provider.LoginType = LoginType.Cookie;
             }
 
             provider.UserName = cookieValue;
