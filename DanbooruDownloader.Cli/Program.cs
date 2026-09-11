@@ -357,6 +357,22 @@ namespace DanbooruDownloader.Cli
             };
         }
 
+        /// <summary>
+        /// Gelbooru's own API key page publishes a hard limit ("10 requests every 1
+        /// second(s)") for API-key-authenticated requests. Nothing in the response tells us
+        /// this programmatically, so if the user hasn't set an explicit --delay, fall back to
+        /// a safe default for exactly that case rather than risk the key getting throttled -
+        /// 150ms keeps well under 10/s even with rounding/network jitter.
+        /// </summary>
+        private static int EffectiveDelayMs(DownloadOptions opts, DanbooruProvider provider) => EffectiveDelayMs(opts.RequestDelayMs, provider);
+
+        private static int EffectiveDelayMs(int requestedDelayMs, DanbooruProvider provider)
+        {
+            if (requestedDelayMs > 0) return requestedDelayMs;
+            if (provider.BoardType == BoardType.Gelbooru && provider.LoginType == LoginType.ApiKey) return 150;
+            return 0;
+        }
+
         private static async Task<(int downloaded, int skipped, int failed, int alreadyKnown)> DownloadPostsAsync(
             CliWebClient client, SqliteProvider db, DanbooruProvider provider,
             List<DanbooruPost> posts, DownloadOptions opts)
@@ -436,9 +452,10 @@ namespace DanbooruDownloader.Cli
                     continue;
                 }
 
-                if (opts.RequestDelayMs > 0 && downloaded + failed > 0)
+                var effectiveDelayMs = EffectiveDelayMs(opts, provider);
+                if (effectiveDelayMs > 0 && downloaded + failed > 0)
                 {
-                    await Task.Delay(opts.RequestDelayMs);
+                    await Task.Delay(effectiveDelayMs);
                 }
 
                 Exception lastError = null;
@@ -496,9 +513,10 @@ namespace DanbooruDownloader.Cli
 
             for (; pagesFetched < maxPages; pagesFetched++, page++)
             {
-                if (opts.RequestDelayMs > 0 && pagesFetched > 0)
+                var effectiveDelayMs = EffectiveDelayMs(opts, provider);
+                if (effectiveDelayMs > 0 && pagesFetched > 0)
                 {
-                    await Task.Delay(opts.RequestDelayMs);
+                    await Task.Delay(effectiveDelayMs);
                 }
 
                 var pageFlags = new Dictionary<string, string>(flags, StringComparer.OrdinalIgnoreCase) { ["page"] = page.ToString() };
@@ -855,7 +873,7 @@ namespace DanbooruDownloader.Cli
             // single shared total - the generic --max-pages default of 1000 would mean up to
             // 400,000 tags/requests here, so tags download gets its own, much smaller default.
             var maxPages = TryInt(flags.GetValueOrDefault("max-pages")) ?? 50;
-            var delayMs = TryInt(flags.GetValueOrDefault("delay")) ?? 0;
+            var delayMs = EffectiveDelayMs(TryInt(flags.GetValueOrDefault("delay")) ?? 0, provider);
 
             using var client = new CliWebClient(new CliConfig());
             List<DanbooruTag> tags;
@@ -1097,9 +1115,10 @@ namespace DanbooruDownloader.Cli
                 // --delay already spaces out requests *within* one artist's gallery walk
                 // (DownloadGalleryAsync); this spaces out the handoff *between* artists too,
                 // since consecutive lines are often the same provider.
-                if (interArtistDelayMs > 0 && i > 0)
+                var effectiveInterArtistDelayMs = EffectiveDelayMs(interArtistDelayMs, provider);
+                if (effectiveInterArtistDelayMs > 0 && i > 0)
                 {
-                    await Task.Delay(interArtistDelayMs);
+                    await Task.Delay(effectiveInterArtistDelayMs);
                 }
 
                 var lineFlags = new Dictionary<string, string>(flags, StringComparer.OrdinalIgnoreCase);
@@ -1223,9 +1242,10 @@ namespace DanbooruDownloader.Cli
 
                 // Same reasoning as add-many: space out the handoff between artists, not
                 // just requests within one artist's own gallery walk.
-                if (interArtistDelayMs > 0 && i > 0)
+                var effectiveInterArtistDelayMs = EffectiveDelayMs(interArtistDelayMs, provider);
+                if (effectiveInterArtistDelayMs > 0 && i > 0)
                 {
-                    await Task.Delay(interArtistDelayMs);
+                    await Task.Delay(effectiveInterArtistDelayMs);
                 }
 
                 Console.WriteLine($"--- Refreshing [{provider.Name}] \"{artist.Tag}\" -> {artist.OutputDir} ---");
