@@ -270,7 +270,11 @@ namespace DanbooruDownloader.Cli
             filename = filename.Replace("%rating%", post.Rating);
             filename = filename.Replace("%md5%", post.MD5);
             filename = filename.Replace("%searchParam%", Helper.SanitizeFilename(query));
-            filename = filename.Replace("%searchtag%", Helper.SanitizeFilename(searchTags));
+            // Fall back to a real name instead of leaving this blank (and producing an ugly
+            // double-slash / empty path segment) when nothing was actually searched for -
+            // e.g. a "browse latest" download with no tags.
+            var searchTagValue = String.IsNullOrWhiteSpace(searchTags) ? "latest" : searchTags;
+            filename = filename.Replace("%searchtag%", Helper.SanitizeFilename(searchTagValue));
             filename = filename.Replace("%originalFilename%", Helper.SanitizeFilename(originalFileName));
 
             string dtFormat = string.IsNullOrWhiteSpace(DefaultDateTimeFormat) ? "yyyy-mm-dd HH:mm:ss" : DefaultDateTimeFormat;

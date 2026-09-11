@@ -338,7 +338,9 @@ namespace DanbooruDownloader.Cli
             return new DownloadOptions
             {
                 OutputDir = flags.GetValueOrDefault("output", "downloads"),
-                FilenameFormatStr = flags.GetValueOrDefault("filename-format", "%provider%/%rating% - %id% - %tags%"),
+                // Grouped by what was searched (tag/artist), not by which site it came from -
+                // that's the more useful grouping when just browsing a downloads folder.
+                FilenameFormatStr = flags.GetValueOrDefault("filename-format", "%searchtag%/%rating% - %id% - %tags%"),
                 Force = flags.ContainsKey("force"),
                 ExtensionFilterRegex = flags.GetValueOrDefault("extension-filter"),
                 ExcludeExtension = flags.ContainsKey("exclude-extension"),
@@ -963,6 +965,15 @@ namespace DanbooruDownloader.Cli
         {
             var opts = BuildDownloadOptions(flags);
             opts.OutputDir = outputDir;
+            // The default format groups by %searchtag% (see BuildDownloadOptions), but here
+            // --output is already a dedicated per-artist folder - nesting by searchtag again
+            // inside it would just duplicate the folder name (e.g. downloads/sushoartworks/
+            // sushoartworks/...), so drop that prefix unless the user explicitly asked for
+            // their own format.
+            if (!flags.ContainsKey("filename-format"))
+            {
+                opts.FilenameFormatStr = "%rating% - %id% - %tags%";
+            }
             // Tracked artists get a browsable index.html by default (no GUI grid anymore);
             // opt out with --no-html-index.
             opts.HtmlIndex = !flags.ContainsKey("no-html-index");
@@ -1178,7 +1189,16 @@ namespace DanbooruDownloader.Cli
 
                 var opts = BuildDownloadOptions(artistFlags);
                 opts.OutputDir = artist.OutputDir;
-                if (artist.FilenameFormat != null) opts.FilenameFormatStr = artist.FilenameFormat;
+                if (artist.FilenameFormat != null)
+                {
+                    opts.FilenameFormatStr = artist.FilenameFormat;
+                }
+                else if (!artistFlags.ContainsKey("filename-format"))
+                {
+                    // Same reasoning as AddOneArtist: --output is already this artist's own
+                    // folder, so don't also nest by %searchtag% inside it.
+                    opts.FilenameFormatStr = "%rating% - %id% - %tags%";
+                }
                 opts.HtmlIndex = !flags.ContainsKey("no-html-index");
 
                 var (downloaded, skipped, failed, pages) = await DownloadGalleryAsync(client, db, provider, artist.Tag, artistFlags, opts, maxPages);
