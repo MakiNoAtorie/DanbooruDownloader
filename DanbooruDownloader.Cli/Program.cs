@@ -38,6 +38,7 @@ namespace DanbooruDownloader.Cli
             // than --flags, so they're handled separately from the flag-based commands.
             if (args[0] == "providers") return await RunProviders(args.Skip(1).ToArray());
             if (args[0] == "cookie") return RunCookie(args.Skip(1).ToArray());
+            if (args[0] == "apikey") return RunApiKey(args.Skip(1).ToArray());
 
             if (args[0] == "tags")
             {
@@ -108,6 +109,7 @@ namespace DanbooruDownloader.Cli
                 danboo batch    --jobs <file> --provider-names <p1,p2,...> --output <dir> [options]
                 danboo providers list|show <name>|check [--providers <path>]
                 danboo cookie set <provider> <value> [--providers <path>]
+                danboo apikey set <provider> <api-key> <username-or-user-id> [--providers <path>]
                 danboo tags download --provider <name> [--output tags.xml] [options]
 
                 Common options:
@@ -907,6 +909,45 @@ namespace DanbooruDownloader.Cli
             provider.UserName = cookieValue;
             new DanbooruProviderDao().Save(providers, providersPath);
             Console.WriteLine($"Cookie value for '{provider.Name}' saved to {providersPath}.");
+            return 0;
+        }
+
+        /// <summary>
+        /// Sets API-key auth for a provider. The second value's meaning depends on the board:
+        /// Danbooru-style boards want a username ("login"), Gelbooru-style boards want a
+        /// numeric account ID ("user_id") - see DanbooruProvider.GetQueryUrl(). Both are
+        /// stored in the same UserName field either way.
+        /// </summary>
+        internal static int RunApiKey(string[] rest)
+        {
+            if (rest.Length < 4 || rest[0] != "set")
+            {
+                Console.Error.WriteLine("Usage: danboo apikey set <provider> <api-key> <username-or-user-id> [--providers <path>]");
+                return 1;
+            }
+
+            var providerName = rest[1];
+            var apiKeyValue = rest[2];
+            var userValue = rest[3];
+            var flags = ParseFlags(rest.Length > 4 ? rest[4..] : Array.Empty<string>());
+            var providersPath = flags.GetValueOrDefault("providers", "DanbooruProviderList.xml");
+
+            var providers = LoadProviders(providersPath, out var loadError);
+            if (loadError != null) { Console.Error.WriteLine(loadError); return 1; }
+
+            var provider = FindProvider(providers, providerName);
+            if (provider == null) { Console.Error.WriteLine($"Provider '{providerName}' not found."); return 1; }
+
+            if (provider.LoginType != LoginType.ApiKey)
+            {
+                Console.WriteLine($"Note: {provider.Name} was LoginType={provider.LoginType} - switching it to ApiKey so this value actually gets used.");
+                provider.LoginType = LoginType.ApiKey;
+            }
+
+            provider.ApiKey = apiKeyValue;
+            provider.UserName = userValue;
+            new DanbooruProviderDao().Save(providers, providersPath);
+            Console.WriteLine($"API key for '{provider.Name}' saved to {providersPath}.");
             return 0;
         }
 

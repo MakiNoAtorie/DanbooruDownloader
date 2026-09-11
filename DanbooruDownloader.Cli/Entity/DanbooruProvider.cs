@@ -148,7 +148,15 @@ namespace DanbooruDownloader.Cli.Entity
                     break;
 
                 case LoginType.ApiKey:
-                    queryStr = $"{queryStr}&api_key={ApiKey}&login={UserName}";
+                    // Gelbooru's DAPI wants api_key+user_id (a numeric account ID), not
+                    // Danbooru's api_key+login (a username) - confirmed live: Danbooru-shaped
+                    // requests to Gelbooru's API came back 401 with an empty body regardless
+                    // of a valid session cookie, but api_key+user_id (from the account's own
+                    // API Access Credentials page) works. UserName holds "the second
+                    // credential" either way, just named/used differently per board.
+                    queryStr = BoardType == BoardType.Gelbooru
+                        ? $"{queryStr}&api_key={ApiKey}&user_id={UserName}"
+                        : $"{queryStr}&api_key={ApiKey}&login={UserName}";
                     break;
             }
 

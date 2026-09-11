@@ -44,8 +44,9 @@ namespace DanbooruDownloader.Cli.Interactive
                 Console.WriteLine("4) Tracked artists (add / list / remove / refresh)");
                 Console.WriteLine("5) Providers (list / show / check)");
                 Console.WriteLine("6) Set a cookie for a provider");
-                Console.WriteLine("7) Download tags.xml (enables %artist%/%character% filenames)");
-                Console.WriteLine("8) Scheduled auto-refresh (launchd)");
+                Console.WriteLine("7) Set an API key for a provider");
+                Console.WriteLine("8) Download tags.xml (enables %artist%/%character% filenames)");
+                Console.WriteLine("9) Scheduled auto-refresh (launchd)");
                 Console.WriteLine("0) Exit");
 
                 var choice = Prompt("Choose an option", "0");
@@ -60,8 +61,9 @@ namespace DanbooruDownloader.Cli.Interactive
                         case "4": await DoArtistMenu(); break;
                         case "5": await DoProvidersMenu(); break;
                         case "6": await DoCookie(); break;
-                        case "7": await DoTagsDownload(); break;
-                        case "8": await DoScheduleMenu(); break;
+                        case "7": DoApiKey(); break;
+                        case "8": await DoTagsDownload(); break;
+                        case "9": await DoScheduleMenu(); break;
                         case "0": case "q": case "exit": case "quit":
                             Console.WriteLine("Bye.");
                             return 0;
@@ -372,6 +374,17 @@ namespace DanbooruDownloader.Cli.Interactive
             var provider = PickProvider(providers);
             var value = PromptRequired("Cookie value");
             Program.RunCookie(new[] { "set", provider.Name, value, "--providers", providersPath });
+        }
+
+        private static void DoApiKey()
+        {
+            Console.WriteLine("\n== Set API key ==");
+            var providersPath = GetProvidersPath();
+            var providers = LoadProvidersOrThrow(providersPath);
+            var provider = PickProvider(providers);
+            var apiKey = PromptRequired("API key");
+            var user = PromptRequired(provider.BoardType == BoardType.Gelbooru ? "User ID (numeric, from your account's API page)" : "Username");
+            Program.RunApiKey(new[] { "set", provider.Name, apiKey, user, "--providers", providersPath });
         }
 
         private static async Task DoTagsDownload()
