@@ -428,6 +428,9 @@ namespace DanbooruDownloader.Cli
             return 0;
         }
 
+        // Filename tokens that need each tag's type (artist, character, ...).
+        private static readonly string[] TagTypeTokens = { "%artist%", "%copyright%", "%character%", "%circle%", "%faults%", "%general%" };
+
         private static async Task<(int downloaded, int skipped, int failed, int alreadyKnown)> DownloadPostsAsync(
             CliWebClient client, SqliteProvider db, DanbooruProvider provider,
             List<DanbooruPost> posts, DownloadOptions opts)
@@ -441,6 +444,22 @@ namespace DanbooruDownloader.Cli
             Regex extFilter = string.IsNullOrWhiteSpace(opts.ExtensionFilterRegex) ? null : new Regex(opts.ExtensionFilterRegex, RegexOptions.IgnoreCase);
 
             int downloaded = 0, skipped = 0, failed = 0, alreadyKnown = 0;
+
+            if (provider.BoardType == BoardType.Gelbooru && TagTypeTokens.Any(opts.FilenameFormatStr.Contains))
+            {
+                // Only posts that will be downloaded need names.
+                var toName = posts.Where(p => !p.Hidden && !string.IsNullOrWhiteSpace(p.FileUrl)
+                    && (opts.Force || db.GetDownloadedFileByProviderAndPostId(provider.Name, p.Id).Count == 0)).ToList();
+                try
+                {
+                    await DanbooruDownloader.Cli.Tags.TagDownloader.ResolveTagTypesAsync(client, provider, toName, EffectiveDelayMs(opts, provider));
+                }
+                catch (Exception ex)
+                {
+                    // Filenames then fall back to tags.xml or the "no tag" values.
+                    Logger.Warn($"Tag type lookup on {provider.Name} failed: {ex.Message}");
+                }
+            }
 
             foreach (var post in posts)
             {

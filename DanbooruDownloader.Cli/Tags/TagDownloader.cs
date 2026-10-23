@@ -1,3 +1,4 @@
+using DanbooruDownloader.Cli.DAO;
 using DanbooruDownloader.Cli.Entity;
 using DanbooruDownloader.Cli.Net;
 using DanbooruDownloader.Cli.Utils;
@@ -79,23 +80,7 @@ namespace DanbooruDownloader.Cli.Tags
                 var url = provider.ApplyAuth(BuildTagUrl(provider, limitPerPage, page, type));
                 log($"GET {Helper.RemoveAuthInfo(url)}");
 
-                string rawXml;
-                using (var stream = await client.GetStreamAsync(url, userAgent: provider.UserAgent))
-                using (var reader = new StreamReader(stream))
-                {
-                    rawXml = await reader.ReadToEndAsync();
-                }
-
-                // A large --limit (or just enough total requests) can itself trip Cloudflare's
-                // bot detection (seen live: a provider that worked fine at limit=50 came back
-                // with a "Just a moment..." challenge page - not valid XML - at limit=1000).
-                // Surface that clearly instead of a bare XML-parse exception.
-                if (rawXml.Contains(DanbooruDownloader.Cli.Helper.CLOUDFLARE_STR) || rawXml.Contains(DanbooruDownloader.Cli.Helper.DDOS_STR))
-                {
-                    throw new InvalidOperationException($"Cloudflare blocked the tag request at page {page} (try a smaller --limit or add --delay).");
-                }
-
-                var pageTags = ParseTags(rawXml, provider.BoardType);
+                var pageTags = ParseTags(await GetTagXmlAsync(client, provider, url), provider.BoardType);
                 if (pageTags.Count == 0)
                 {
                     log($"{DescribeType(type)} page {page}: empty, done.");
@@ -117,6 +102,99 @@ namespace DanbooruDownloader.Cli.Tags
                     break; // short page: last one
                 }
             }
+        }
+
+        private static async Task<string> GetTagXmlAsync(CliWebClient client, DanbooruProvider provider, string url)
+        {
+            string rawXml;
+            using (var stream = await client.GetStreamAsync(url, userAgent: provider.UserAgent))
+            using (var reader = new StreamReader(stream))
+            {
+                rawXml = await reader.ReadToEndAsync();
+            }
+
+            // A large --limit (or just enough total requests) can itself trip Cloudflare's
+            // bot detection (seen live: a provider that worked fine at limit=50 came back
+            // with a "Just a moment..." challenge page - not valid XML - at limit=1000).
+            // Surface that clearly instead of a bare XML-parse exception.
+            if (rawXml.Contains(Helper.CLOUDFLARE_STR) || rawXml.Contains(Helper.DDOS_STR))
+            {
+                throw new InvalidOperationException("Cloudflare blocked the tag request (try a smaller --limit or add --delay).");
+            }
+            return rawXml;
+        }
+
+        // ponytail: one tag cache shared by all providers for the run (like tags.xml); per-provider caches if boards disagree on types.
+        private static readonly HashSet<string> LookedUpNames = new HashSet<string>();
+        private static readonly HashSet<string> NoNamesLookup = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// Looks up the types of these posts' Unknown tags with Gelbooru's names= tag query
+        /// (verified on gelbooru.com 2026-10), so %artist%/%character%/%copyright% resolve
+        /// without tags.xml. Older Gelbooru 0.2 boards ignore names= and return unrelated tags;
+        /// that switches the lookup off for the provider for the rest of the run.
+        /// </summary>
+        public static async Task ResolveTagTypesAsync(CliWebClient client, DanbooruProvider provider, List<DanbooruPost> posts, int delayMs)
+        {
+            if (NoNamesLookup.Contains(provider.Name)) return;
+
+            var pending = posts.SelectMany(p => p.TagsEntity)
+                .Where(t => t.Type == DanbooruTagType.Unknown && !string.IsNullOrEmpty(t.Name))
+                .Select(t => t.Name)
+                .Distinct()
+                .Where(n => !LookedUpNames.Contains(n))
+                .ToList();
+            if (pending.Count == 0) return;
+
+            var found = new List<DanbooruTag>();
+            foreach (var batch in NameBatches(pending))
+            {
+                if (delayMs > 0) await Task.Delay(delayMs);
+                var url = provider.ApplyAuth($"{provider.Url}/index.php?page=dapi&s=tag&q=index&limit={MaxNamesPerRequest}&names={string.Join("%20", batch.Select(Uri.EscapeDataString))}");
+                var tags = ParseTags(await GetTagXmlAsync(client, provider, url), provider.BoardType)
+                    .Where(t => !string.IsNullOrEmpty(t.Name))
+                    .ToList();
+
+                var requested = new HashSet<string>(batch);
+                if (tags.Any(t => !requested.Contains(t.Name)))
+                {
+                    NoNamesLookup.Add(provider.Name);
+                    Program.Logger.Warn($"{provider.Name} does not support tag lookup by name; %artist%/%character%/%copyright% need tags.xml there.");
+                    break;
+                }
+                found.AddRange(tags);
+                LookedUpNames.UnionWith(batch);
+            }
+
+            DanbooruTagsDao.Instance.Add(found);
+            foreach (var post in posts)
+            {
+                post.TagsEntity = Helper.ParseTags(post.Tags, provider);
+            }
+        }
+
+        // Gelbooru answers at most 100 tags per request; also keep the URL well under common
+        // 8 KB server limits.
+        private const int MaxNamesPerRequest = 100;
+        private const int MaxNamesUrlLength = 4000;
+
+        internal static IEnumerable<List<string>> NameBatches(IEnumerable<string> names)
+        {
+            var batch = new List<string>();
+            var length = 0;
+            foreach (var name in names)
+            {
+                var escapedLength = Uri.EscapeDataString(name).Length + 3;
+                if (batch.Count == MaxNamesPerRequest || (batch.Count > 0 && length + escapedLength > MaxNamesUrlLength))
+                {
+                    yield return batch;
+                    batch = new List<string>();
+                    length = 0;
+                }
+                batch.Add(name);
+                length += escapedLength;
+            }
+            if (batch.Count > 0) yield return batch;
         }
 
         internal static List<DanbooruTag> ParseTags(string rawXml, BoardType boardType)

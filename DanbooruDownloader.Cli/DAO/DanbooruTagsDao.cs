@@ -21,7 +21,7 @@ namespace DanbooruDownloader.Cli.DAO
         {
             if (!File.Exists(xmlTagFile))
             {
-                Program.Logger.Warn($"{xmlTagFile} not found - tag categorization disabled until it's downloaded.");
+                Program.Logger.Debug($"{xmlTagFile} not found; tag types come from the provider where it sends them.");
                 this.Tags = new DanbooruTagCollection();
                 return;
             }
@@ -41,14 +41,26 @@ namespace DanbooruDownloader.Cli.DAO
 
         private Dictionary<string, DanbooruTag> _byName;
 
+        // tags.xml can hold many thousands of tags and lookups run for every tag of every post.
+        private Dictionary<string, DanbooruTag> ByName => _byName ??= (Tags.Tag ?? Array.Empty<DanbooruTag>())
+            .Where(x => x.Name != null)
+            .GroupBy(x => x.Name)
+            .ToDictionary(g => g.Key, g => g.First());
+
+        /// <summary>
+        /// Adds tags learned at run time (e.g. a Gelbooru names= lookup); not saved to tags.xml.
+        /// </summary>
+        public void Add(IEnumerable<DanbooruTag> tags)
+        {
+            foreach (var tag in tags.Where(t => !string.IsNullOrEmpty(t.Name)))
+            {
+                ByName[tag.Name] = tag;
+            }
+        }
+
         public DanbooruTag GetTag(string tag)
         {
-            // tags.xml can hold many thousands of tags and this runs for every tag of every post.
-            _byName ??= (Tags.Tag ?? Array.Empty<DanbooruTag>())
-                .Where(x => x.Name != null)
-                .GroupBy(x => x.Name)
-                .ToDictionary(g => g.Key, g => g.First());
-            if (_byName.TryGetValue(tag, out var result)) return result;
+            if (ByName.TryGetValue(tag, out var result)) return result;
 
             return new DanbooruTag
             {

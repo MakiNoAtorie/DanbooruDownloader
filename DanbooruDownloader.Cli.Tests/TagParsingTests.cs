@@ -31,5 +31,17 @@ namespace DanbooruDownloader.Cli.Tests
             Assert.Equal(DanbooruTagType.Unknown, tags[1].Type);
             Assert.True(tags[1].Ambiguous);
         }
+
+        [Fact]
+        public void Name_batches_respect_count_and_url_length()
+        {
+            var shortNames = Enumerable.Range(0, 250).Select(i => "t" + i).ToList();
+            Assert.Equal(new[] { 100, 100, 50 }, TagDownloader.NameBatches(shortNames).Select(b => b.Count));
+
+            var longNames = Enumerable.Range(0, 10).Select(i => new string('x', 1500) + i).ToList();
+            var batches = TagDownloader.NameBatches(longNames).ToList();
+            Assert.All(batches, b => Assert.True(b.Sum(n => n.Length) <= 4000 || b.Count == 1));
+            Assert.Equal(10, batches.Sum(b => b.Count));
+        }
     }
 }
