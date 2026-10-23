@@ -20,7 +20,9 @@ RID=${1:-$OS-$ARCH}
 dotnet publish -c Release -r "$RID" \
   --self-contained true \
   -p:PublishSingleFile=true \
+  -p:IncludeNativeLibrariesForSelfExtract=true \
   -p:AssemblyName=danboo \
+  -p:DebugType=none \
   -o ./publish
 
 echo

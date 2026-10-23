@@ -90,8 +90,9 @@ namespace DanbooruDownloader.Cli.Scheduling
             if (string.Equals(exeName, "dotnet", StringComparison.OrdinalIgnoreCase))
             {
                 // Framework-dependent: re-invoke via "dotnet <dll>".
-                var dllPath = Assembly.GetExecutingAssembly().Location;
-                if (string.IsNullOrWhiteSpace(dllPath))
+                // Not Assembly.Location: it is empty in a single-file build.
+                var dllPath = Path.Combine(AppContext.BaseDirectory, Assembly.GetExecutingAssembly().GetName().Name + ".dll");
+                if (!File.Exists(dllPath))
                 {
                     return (null, "Could not determine the CLI's .dll path for a 'dotnet <dll>' launchd command.");
                 }

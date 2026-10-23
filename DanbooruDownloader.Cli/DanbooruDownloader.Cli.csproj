@@ -19,7 +19,8 @@
 
   <ItemGroup>
     <None Include="DanbooruProviderList.xml" CopyToOutputDirectory="PreserveNewest" />
-    <None Include=".env" CopyToOutputDirectory="PreserveNewest" Condition="Exists('.env')" />
+    <!-- Credentials: next to the build output for dotnet run, never into a publish folder that may be shared. -->
+    <None Include=".env" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="Never" Condition="Exists('.env')" />
   </ItemGroup>
 
 </Project>
