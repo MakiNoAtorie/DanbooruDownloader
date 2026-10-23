@@ -69,6 +69,17 @@ namespace DanbooruDownloader.Cli.Tests
             Assert.Equal("_/7", Helper.MakeFilename(format, Post("https://x/y.jpg", "..")));
         }
 
+        [Theory]
+        [InlineData("con", "con_/7")]
+        [InlineData("aux.x", "aux.x_/7")]
+        [InlineData("console", "console/7")]
+        public void Windows_device_names_are_avoided(string tag, string expected)
+        {
+            var format = new DanbooruFilenameFormat { FilenameFormat = "%tags%/%id%" };
+
+            Assert.Equal(expected, Helper.MakeFilename(format, Post("https://x/y.jpg", tag)));
+        }
+
         [Fact]
         public void Gelbooru_api_key_auth_is_encoded_and_masked()
         {

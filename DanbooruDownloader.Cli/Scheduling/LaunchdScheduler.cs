@@ -21,6 +21,11 @@ namespace DanbooruDownloader.Cli.Scheduling
 
         public static (bool ok, string message) Install(int intervalHours, string dbPath, string providersPath, string workingDirectory)
         {
+            if (!OperatingSystem.IsMacOS())
+            {
+                return (false, "Scheduling uses macOS launchd. On Windows, create a Task Scheduler task that runs: run.bat artist refresh --all");
+            }
+
             var (programArgs, error) = ResolveProgramArguments();
             if (error != null) return (false, error);
 

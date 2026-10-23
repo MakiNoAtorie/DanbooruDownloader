@@ -354,6 +354,18 @@ namespace DanbooruDownloader.Cli
             return string.IsNullOrWhiteSpace(extension) ? ".jpg" : extension;
         }
 
+        // Explorer and most Windows viewers cannot open paths over MAX_PATH (260 with the
+        // terminator), although .NET can write them, so shorten the file name to fit.
+        internal static string FitWindowsPath(string baseFilename, string extension)
+        {
+            const int maxPath = 259;
+            var over = Path.GetFullPath(baseFilename).Length + extension.Length - maxPath;
+            if (over <= 0) return baseFilename;
+            // The folder alone is too long: cutting the name cannot fix it.
+            if (over >= Path.GetFileName(baseFilename).Length) return baseFilename;
+            return baseFilename[..^over].TrimEnd(' ', '.');
+        }
+
         // Without a known MD5 there is nothing to compare, so assume it is the same file.
         internal static bool FileMatchesMd5(string path, string md5)
         {
@@ -515,6 +527,7 @@ namespace DanbooruDownloader.Cli
                 }
 
                 var baseFilename = Helper.MakeFilename(filenameFormat, post);
+                if (OperatingSystem.IsWindows()) baseFilename = FitWindowsPath(baseFilename, extension);
                 var fullPath = baseFilename + extension;
                 // Another post can produce the same name (formats without %id%, or %id% cut
                 // off by the length limit). Trust an existing file only if its MD5 matches;

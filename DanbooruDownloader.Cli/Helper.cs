@@ -336,8 +336,12 @@ namespace DanbooruDownloader.Cli
             if (segment.Length > 0 && char.IsHighSurrogate(segment[^1])) segment = segment[..^1];
             segment = segment.Trim();
             // A server-supplied tag of "." or ".." must not become a directory traversal.
-            return segment is "." or ".." ? "_" : segment;
+            if (segment is "." or "..") return "_";
+            // Windows cannot create files or folders named like devices (con, nul, com1.jpg, ...).
+            return WindowsReservedName.IsMatch(segment) ? segment + "_" : segment;
         }
+
+        private static readonly Regex WindowsReservedName = new Regex(@"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\..*)?$", RegexOptions.IgnoreCase);
 
         private static List<DanbooruTag> ReadTagsFromTextFile(string filename)
         {

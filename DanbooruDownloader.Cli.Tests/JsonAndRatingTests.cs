@@ -131,5 +131,17 @@ namespace DanbooruDownloader.Cli.Tests
                 File.Delete(path);
             }
         }
+
+        [Fact]
+        public void Windows_paths_are_shortened_to_max_path()
+        {
+            if (!OperatingSystem.IsWindows()) return;
+            var baseFilename = "C:/out/touhou/g - 1 - " + new string('t', 300);
+
+            var fitted = Program.FitWindowsPath(baseFilename, ".jpg");
+
+            Assert.Equal(259, Path.GetFullPath(fitted).Length + ".jpg".Length);
+            Assert.Equal("C:/out/x", Program.FitWindowsPath("C:/out/x", ".jpg"));
+        }
     }
 }
