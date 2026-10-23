@@ -151,6 +151,7 @@ namespace DanbooruDownloader.Cli.DAO
                                 if (reader.Name.ToLowerInvariant().Equals("reason")) ResponseMessage = reader.Value;
                                 else if (reader.Name.ToLowerInvariant().Equals("success")) Success = bool.Parse(reader.Value);
                             }
+                            SetErrorIfFailed();
                         }
                         else if (nodeName.Equals("result"))
                         {
@@ -160,6 +161,7 @@ namespace DanbooruDownloader.Cli.DAO
                                 {
                                     Success = bool.Parse(reader.Value);
                                     ResponseMessage = reader.ReadString();
+                                    SetErrorIfFailed();
                                 }
                             }
                         }
@@ -285,6 +287,13 @@ namespace DanbooruDownloader.Cli.DAO
             }
         }
 
+        // A failed API response (bad API key, rate limit, ...) has no posts; without this it
+        // would look like an empty page, which gallery walks treat as the end of the gallery.
+        private void SetErrorIfFailed()
+        {
+            if (!Success) errorMessage = $"{Option.Provider.Name} API error: {(String.IsNullOrWhiteSpace(ResponseMessage) ? "request failed" : ResponseMessage)}";
+        }
+
         private static void TryParseInt(string value, Action<int> assign)
         {
             assign(-1);
@@ -336,9 +345,10 @@ namespace DanbooruDownloader.Cli.DAO
                     switch (val[0].ToLowerInvariant())
                     {
                         case "\"reason\"": ResponseMessage = val[1].Replace("\"", ""); break;
-                        case "\"success\"": Success = bool.Parse(val[1].Replace("\"", "")); break;
+                        case "\"success\"": Success = bool.Parse(val[1].Replace("\"", "").Trim()); break;
                     }
                 }
+                SetErrorIfFailed();
                 return;
             }
 

@@ -86,7 +86,7 @@ namespace DanbooruDownloader.Cli.DAO
                                 case "DateTimeFormat": newProvider.DateTimeFormat = reader.ReadElementContentAsString(); break;
                             }
                         }
-                    } while (!reader.Name.Equals("DanbooruProvider"));
+                    } while (!reader.EOF && !reader.Name.Equals("DanbooruProvider"));
                     list.Add(newProvider);
                 }
             }
@@ -105,6 +105,11 @@ namespace DanbooruDownloader.Cli.DAO
                 foreach (DanbooruProvider p in list)
                 {
                     writer.WriteStartElement("DanbooruProvider");
+                    // The plaintext password is blanked below; keep the login by persisting its hash.
+                    if (!String.IsNullOrEmpty(p.Password) && String.IsNullOrWhiteSpace(p.PasswordHash) && p.PasswordSalt != null)
+                    {
+                        p.PasswordHash = Helper.GeneratePasswordHash(p.Password, p.PasswordSalt);
+                    }
                     PropertyInfo[] propertyInfos = typeof(DanbooruProvider).GetProperties();
                     foreach (PropertyInfo info in propertyInfos)
                     {

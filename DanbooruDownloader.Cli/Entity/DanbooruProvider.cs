@@ -120,6 +120,18 @@ namespace DanbooruDownloader.Cli.Entity
 
             queryStr = queryRootUrl.Replace("%_query%", queryStr);
 
+            return ApplyAuth($"{Url}{queryStr}");
+        }
+
+        private bool _cookieAsked;
+
+        /// <summary>
+        /// Appends credential query parameters to a request URL, or loads the cookie jar, per
+        /// LoginType. Every request to this provider (posts and tags) goes through here.
+        /// </summary>
+        public string ApplyAuth(string url)
+        {
+            var sep = url.Contains('?') ? "&" : "?";
             switch (LoginType)
             {
                 case LoginType.UserPass:
@@ -130,22 +142,23 @@ namespace DanbooruDownloader.Cli.Entity
                             hash = Helper.GeneratePasswordHash(Password, PasswordSalt);
                             PasswordHash = hash;
                         }
-                        queryStr = $"{queryStr}&login={UserName}&password_hash={hash}";
+                        return $"{url}{sep}login={Uri.EscapeDataString(UserName ?? "")}&password_hash={hash}";
                     }
-                    break;
 
                 case LoginType.Cookie:
                     ReloadCookie(UserName);
-                    break;
+                    return url;
 
                 case LoginType.CookieAlwaysAsk:
-                    // Prompted here (lazily, only for the provider actually in use) rather
-                    // than while the whole provider list loads - see DanbooruProviderDao.Read.
-                    Console.Write($"Please input the cookie value for {Name}: ");
-                    var cookie = Console.ReadLine();
-                    Program.Logger.InfoFormat("Using cookie value for {0} = {1}", Name, cookie);
-                    ReloadCookie(cookie);
-                    break;
+                    // Prompted lazily (only for the provider actually in use), and only once
+                    // per run - a gallery walk calls this for every page.
+                    if (!_cookieAsked)
+                    {
+                        Console.Write($"Please input the cookie value for {Name}: ");
+                        ReloadCookie(Console.ReadLine());
+                        _cookieAsked = true;
+                    }
+                    return url;
 
                 case LoginType.ApiKey:
                     // Gelbooru's DAPI wants api_key+user_id (a numeric account ID), not
@@ -154,13 +167,15 @@ namespace DanbooruDownloader.Cli.Entity
                     // of a valid session cookie, but api_key+user_id (from the account's own
                     // API Access Credentials page) works. UserName holds "the second
                     // credential" either way, just named/used differently per board.
-                    queryStr = BoardType == BoardType.Gelbooru
-                        ? $"{queryStr}&api_key={ApiKey}&user_id={UserName}"
-                        : $"{queryStr}&api_key={ApiKey}&login={UserName}";
-                    break;
-            }
+                    var key = Uri.EscapeDataString(ApiKey ?? "");
+                    var user = Uri.EscapeDataString(UserName ?? "");
+                    return BoardType == BoardType.Gelbooru
+                        ? $"{url}{sep}api_key={key}&user_id={user}"
+                        : $"{url}{sep}api_key={key}&login={user}";
 
-            return $"{Url}{queryStr}";
+                default:
+                    return url;
+            }
         }
 
         public void ReloadCookie(string newCookie)

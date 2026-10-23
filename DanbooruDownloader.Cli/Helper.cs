@@ -81,28 +81,12 @@ namespace DanbooruDownloader.Cli
         }
 
         /// <summary>
-        /// Replace password_hash param with '*'
+        /// Replace password_hash and api_key params with '*'
         /// </summary>
         public static string RemoveAuthInfo(string url)
         {
-            if (!string.IsNullOrWhiteSpace(url) && url.Contains("password_hash="))
-            {
-                var splitted = url.Split('&');
-                for (int i = 0; i < splitted.Length; ++i)
-                {
-                    if (splitted[i].StartsWith("password_hash="))
-                    {
-                        var passSplit = splitted[i].Split('=');
-                        if (passSplit.Length == 2)
-                        {
-                            passSplit[1] = "".PadLeft(passSplit[1].Length, '*');
-                        }
-                        splitted[i] = String.Join("=", passSplit);
-                    }
-                }
-                return String.Join("&", splitted);
-            }
-            else return url;
+            if (string.IsNullOrWhiteSpace(url)) return url;
+            return Regex.Replace(url, @"([?&](?:password_hash|api_key)=)([^&]*)", m => m.Groups[1].Value + new string('*', m.Groups[2].Length));
         }
 
         public static bool IsTagsXmlExist()
@@ -258,12 +242,10 @@ namespace DanbooruDownloader.Cli
             string provider = post.Provider.Name;
             string query = post.Query;
             string searchTags = post.SearchTags;
-            string originalFileName = post.FileUrl.Split('/').Last();
+            string fileUrlPath = post.FileUrl.Split('?', '#')[0];
+            string originalFileName = Uri.UnescapeDataString(Path.GetFileNameWithoutExtension(fileUrlPath.Split('/').Last()));
 
             filename = Helper.SanitizeFilename(filename, true);
-
-            originalFileName = originalFileName.Substring(0, originalFileName.LastIndexOf('.'));
-            originalFileName = Uri.UnescapeDataString(originalFileName);
 
             filename = filename.Replace("%provider%", Helper.SanitizeFilename(provider));
             filename = filename.Replace("%id%", post.Id);
@@ -331,14 +313,30 @@ namespace DanbooruDownloader.Cli
             }
             filename = filename.Replace("%tags%", Helper.SanitizeFilename(string.Join(" ", allTempTags)));
 
+            // Limit each generated path segment, never the base folder: truncating the joined
+            // path could cut into the base folder and write files somewhere else.
+            filename = string.Join("/", filename.Split('/', '\\').Select(s => LimitPathSegment(s, format.Limit)));
+
             if (format.BaseFolder.EndsWith("/") || format.BaseFolder.EndsWith("\\"))
                 filename = format.BaseFolder + filename;
             else if (!String.IsNullOrWhiteSpace(format.BaseFolder))
                 filename = format.BaseFolder + "/" + filename;
 
-            filename = filename.Substring(0, filename.Length < format.Limit ? filename.Length : format.Limit).Trim();
-
             return filename;
+        }
+
+        // macOS/Linux cap a file name at 255 UTF-8 bytes (CJK tags take 3 bytes per char), so
+        // cap bytes too, leaving room for the extension and the ".!tmp" download suffix.
+        private const int MaxSegmentUtf8Bytes = 200;
+
+        private static string LimitPathSegment(string segment, int charLimit)
+        {
+            if (segment.Length > charLimit) segment = segment[..charLimit];
+            while (Encoding.UTF8.GetByteCount(segment) > MaxSegmentUtf8Bytes) segment = segment[..^1];
+            if (segment.Length > 0 && char.IsHighSurrogate(segment[^1])) segment = segment[..^1];
+            segment = segment.Trim();
+            // A server-supplied tag of "." or ".." must not become a directory traversal.
+            return segment is "." or ".." ? "_" : segment;
         }
 
         private static List<DanbooruTag> ReadTagsFromTextFile(string filename)
@@ -437,9 +435,10 @@ namespace DanbooruDownloader.Cli
                 foreach (var cookieStr in temp)
                 {
                     if (!cookieStr.Contains("=")) continue;
-                    var temp2 = cookieStr.Split('=');
+                    // Values may contain '=' (base64 padding), so split on the first one only.
+                    var temp2 = cookieStr.Split('=', 2);
                     var name = temp2[0].Trim();
-                    var value = temp2[1];
+                    var value = temp2[1].Trim();
                     var path = "/";
                     Uri uri = new Uri(url);
                     var c = new Cookie(name, value, path, uri.Authority);
@@ -448,7 +447,8 @@ namespace DanbooruDownloader.Cli
             }
             catch (Exception ex)
             {
-                Program.Logger.Error(ex.Message + "\r\ncookie: " + cookiesStr, ex);
+                // The cookie string is a credential; never log it.
+                Program.Logger.Error("Failed to parse cookie value", ex);
             }
             return cookies;
         }

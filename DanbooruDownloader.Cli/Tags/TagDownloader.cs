@@ -78,8 +78,8 @@ namespace DanbooruDownloader.Cli.Tags
                     await Task.Delay(delayMs);
                 }
 
-                var url = BuildTagUrl(provider, limitPerPage, page, type);
-                log($"GET {url}");
+                var url = provider.ApplyAuth(BuildTagUrl(provider, limitPerPage, page, type));
+                log($"GET {Helper.RemoveAuthInfo(url)}");
 
                 string rawXml;
                 using (var stream = await client.GetStreamAsync(url))
@@ -133,9 +133,9 @@ namespace DanbooruDownloader.Cli.Tags
             return provider.BoardType switch
             {
                 BoardType.Gelbooru => $"{provider.Url}/index.php?page=dapi&s=tag&q=index&limit={limit}&pid={page}&orderby=count",
-                // Danbooru-style (Moebooru): type= filters server-side when given, otherwise
-                // falls back to count ordering. Shimmie2 uses the same shape on the one
-                // board we've verified (Konachan) and falls back to this too.
+                // Danbooru-style (Moebooru, verified on Konachan): type= filters server-side
+                // when given, otherwise falls back to count ordering. Shimmie2 has no tag API;
+                // it falls through here and fails with a parse error.
                 _ => type.HasValue
                     ? $"{provider.Url}/tag.xml?limit={limit}&page={page}&type={(int)type.Value}"
                     : $"{provider.Url}/tag.xml?limit={limit}&page={page}&order=count",

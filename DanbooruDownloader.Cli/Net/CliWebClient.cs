@@ -64,14 +64,20 @@ namespace DanbooruDownloader.Cli.Net
             var tempPath = destinationPath + ".!tmp";
             Directory.CreateDirectory(Path.GetDirectoryName(destinationPath) ?? ".");
 
-            using (var fileStream = File.Create(tempPath))
-            using (var responseStream = await response.Content.ReadAsStreamAsync())
+            try
             {
-                await responseStream.CopyToAsync(fileStream);
+                using (var fileStream = File.Create(tempPath))
+                using (var responseStream = await response.Content.ReadAsStreamAsync())
+                {
+                    await responseStream.CopyToAsync(fileStream);
+                }
+                File.Move(tempPath, destinationPath, overwrite: true);
             }
-
-            if (File.Exists(destinationPath)) File.Delete(destinationPath);
-            File.Move(tempPath, destinationPath);
+            catch
+            {
+                File.Delete(tempPath);
+                throw;
+            }
         }
 
         public void Dispose()

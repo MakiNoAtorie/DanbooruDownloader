@@ -1,6 +1,7 @@
 using DanbooruDownloader.Cli.Entity;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 
@@ -24,10 +25,9 @@ namespace DanbooruDownloader.Cli.Interactive
         // from 0: Could not find file..."). Silently default instead of asking; anyone who
         // genuinely needs a different path still has the flag-based commands (--providers,
         // --db) for that.
-        private const string DefaultProvidersPath = "DanbooruProviderList.xml";
         private const string DefaultDbPath = "downloaded.db";
 
-        private static string GetProvidersPath() => DefaultProvidersPath;
+        private static string GetProvidersPath() => Program.DefaultProvidersPath;
         private static string GetDbPath() => DefaultDbPath;
 
         public static async Task<int> RunAsync()
@@ -92,7 +92,11 @@ namespace DanbooruDownloader.Cli.Interactive
         {
             while (true)
             {
-                var value = Prompt(label);
+                Console.Write($"{label}: ");
+                var input = Console.ReadLine();
+                // Closed stdin returns null forever; stop instead of looping.
+                if (input == null) throw new EndOfStreamException("Input closed.");
+                var value = input.Trim();
                 if (!string.IsNullOrWhiteSpace(value)) return value;
                 Console.WriteLine("This is required.");
             }
@@ -269,8 +273,6 @@ namespace DanbooruDownloader.Cli.Interactive
             var choice = Prompt("Choose an option", "0");
             if (choice == "0") return;
 
-            // Only prompt for the tracking DB once a real action is chosen (not on "Back") -
-            // GetDbPath() itself only prompts the first time it's ever called this session.
             var flags = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["db"] = GetDbPath() };
 
             switch (choice)

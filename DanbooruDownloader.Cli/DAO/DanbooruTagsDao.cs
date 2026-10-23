@@ -39,13 +39,16 @@ namespace DanbooruDownloader.Cli.DAO
             }
         }
 
+        private Dictionary<string, DanbooruTag> _byName;
+
         public DanbooruTag GetTag(string tag)
         {
-            if (Tags.Tag != null)
-            {
-                var result = Tags.Tag.FirstOrDefault(x => x.Name == tag);
-                if (result != null) return result;
-            }
+            // tags.xml can hold many thousands of tags and this runs for every tag of every post.
+            _byName ??= (Tags.Tag ?? Array.Empty<DanbooruTag>())
+                .Where(x => x.Name != null)
+                .GroupBy(x => x.Name)
+                .ToDictionary(g => g.Key, g => g.First());
+            if (_byName.TryGetValue(tag, out var result)) return result;
 
             return new DanbooruTag
             {

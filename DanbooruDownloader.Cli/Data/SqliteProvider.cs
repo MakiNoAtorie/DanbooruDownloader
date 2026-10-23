@@ -61,6 +61,13 @@ CREATE TABLE IF NOT EXISTS tracked_artists (
 
             MigrateAddMd5Column(connection);
 
+            // Every candidate post runs these lookups; without indexes each is a full table scan.
+            var indexCmd = connection.CreateCommand();
+            indexCmd.CommandText = @"
+CREATE INDEX IF NOT EXISTS ix_downloaded_files_provider_post ON downloaded_files (provider_name, post_id);
+CREATE INDEX IF NOT EXISTS ix_downloaded_files_md5 ON downloaded_files (md5);";
+            indexCmd.ExecuteNonQuery();
+
             return result > -1;
         }
 

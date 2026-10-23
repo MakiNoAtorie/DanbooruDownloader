@@ -130,7 +130,7 @@ namespace DanbooruDownloader.Cli
 
                 download/batch/artist:
                   --output <dir>        Base output folder (default: ./downloads)
-                  --filename-format <f> %token% template (default: %provider%/%rating% - %id% - %tags%)
+                  --filename-format <f> %token% template (default: %searchtag%/%rating% - %id% - %tags%)
                   --db <path>           Dedup SQLite DB path (default: ./downloaded.db)
                   --force                Re-download even if already recorded/on disk
                   --extension-filter <r> Regex against the file extension
@@ -157,8 +157,8 @@ namespace DanbooruDownloader.Cli
                   "artist add" downloads the artist's entire gallery (paging through results
                   until an empty page) into --output, and remembers the provider/tag/output/
                   filename-format/rating so "artist refresh" can be run later with no flags -
-                  it re-walks pages from the newest post until it hits a page that's entirely
-                  already-downloaded, so only new work gets fetched. Generates an index.html
+                  it re-walks pages from the newest post until it hits a page with nothing
+                  new to download, so only new work gets fetched. Generates an index.html
                   in --output by default (--no-html-index to skip).
 
                   "artist add-many" reads --file, one "provider,tag,output_dir[,rating]" line
@@ -182,17 +182,34 @@ namespace DanbooruDownloader.Cli
 
         private static Dictionary<string, string> ParseFlags(string[] args)
         {
+            static bool IsFlag(string s) => s.StartsWith("--") || (s.Length == 2 && s[0] == '-');
+
             var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             for (int i = 0; i < args.Length; i++)
             {
-                if (!args[i].StartsWith("--") && !(args[i].StartsWith("-") && args[i].Length == 2)) continue;
+                if (!IsFlag(args[i])) continue;
 
                 var key = args[i].TrimStart('-');
-                var hasValue = i + 1 < args.Length && !(args[i + 1].StartsWith("--"));
+                var hasValue = i + 1 < args.Length && !IsFlag(args[i + 1]);
                 result[key] = hasValue ? args[++i] : "true";
             }
             return result;
         }
+
+        // Prefer a provider list in the working directory; fall back to the one shipped next
+        // to the binary, so a launcher started from another directory still finds it.
+        internal static string DefaultProvidersPath
+        {
+            get
+            {
+                const string name = "DanbooruProviderList.xml";
+                if (File.Exists(name)) return name;
+                var shipped = Path.Combine(AppContext.BaseDirectory, name);
+                return File.Exists(shipped) ? shipped : name;
+            }
+        }
+
+        private static string GetProvidersPath(Dictionary<string, string> flags) => flags.GetValueOrDefault("providers") ?? DefaultProvidersPath;
 
         private static int? TryInt(string value)
         {
@@ -275,7 +292,7 @@ namespace DanbooruDownloader.Cli
         private static async Task<(DanbooruPostDao dao, string error)> FetchPostsWithRetry(CliWebClient client, DanbooruProvider provider, DanbooruSearchParam searchParam, int retries, int retryDelayMs)
         {
             var url = provider.GetQueryUrl(searchParam);
-            Logger.Debug($"GET {url}");
+            Logger.Debug($"GET {Helper.RemoveAuthInfo(url)}");
 
             string lastError = null;
             for (int attempt = 0; attempt <= retries; attempt++)
@@ -496,16 +513,16 @@ namespace DanbooruDownloader.Cli
         }
 
         /// <summary>
-        /// Page through a provider's search results starting at searchParam.Page (default 1),
-        /// downloading each page, until a page comes back empty (end of gallery) or a full
-        /// page's posts were all already known (dedup DB hits) - which means we've caught up
-        /// to previously-downloaded content, so it's safe to stop instead of re-walking the
-        /// entire history every time. Used for both a one-off full-gallery grab and for
-        /// `artist refresh`, where it doubles as the incremental "only fetch what's new" logic.
+        /// Page through a provider's search results starting at --page (default: the board's
+        /// first page), downloading each page, until a page comes back empty (end of gallery).
+        /// With stopWhenCaughtUp (artist refresh only), also stop at the first page that needed
+        /// no new downloads - the newest-first ordering means everything older is already
+        /// there. Full grabs (artist add, --all-pages) must not stop early: an interrupted or
+        /// partial earlier run leaves known posts on page 1 but gaps further back.
         /// </summary>
         private static async Task<(int downloaded, int skipped, int failed, int pages)> DownloadGalleryAsync(
             CliWebClient client, SqliteProvider db, DanbooruProvider provider,
-            string tag, Dictionary<string, string> flags, DownloadOptions opts, int maxPages)
+            string tag, Dictionary<string, string> flags, DownloadOptions opts, int maxPages, bool stopWhenCaughtUp = false)
         {
             int totalDownloaded = 0, totalSkipped = 0, totalFailed = 0;
             int page = TryInt(flags.GetValueOrDefault("page")) ?? PageIndexing.FirstPage(provider.BoardType);
@@ -543,7 +560,9 @@ namespace DanbooruDownloader.Cli
                 totalSkipped += skipped;
                 totalFailed += failed;
 
-                if (alreadyKnown == posts.Count)
+                // Filtered posts (blacklist, extension, no URL) never become "known", so judge
+                // caught-up by "nothing new was needed" rather than "every post was known".
+                if (stopWhenCaughtUp && alreadyKnown > 0 && downloaded == 0 && failed == 0)
                 {
                     Logger.Debug($"Page {page}: entirely already-downloaded, caught up.");
                     pagesFetched++;
@@ -563,7 +582,7 @@ namespace DanbooruDownloader.Cli
 
         internal static async Task<int> RunSearch(Dictionary<string, string> flags)
         {
-            var providersPath = flags.GetValueOrDefault("providers", "DanbooruProviderList.xml");
+            var providersPath = GetProvidersPath(flags);
             var providerName = flags.GetValueOrDefault("provider");
             if (string.IsNullOrWhiteSpace(providerName))
             {
@@ -614,7 +633,7 @@ namespace DanbooruDownloader.Cli
 
         internal static async Task<int> RunDownload(Dictionary<string, string> flags)
         {
-            var providersPath = flags.GetValueOrDefault("providers", "DanbooruProviderList.xml");
+            var providersPath = GetProvidersPath(flags);
             var providerName = flags.GetValueOrDefault("provider");
             if (string.IsNullOrWhiteSpace(providerName))
             {
@@ -681,7 +700,7 @@ namespace DanbooruDownloader.Cli
                 return 1;
             }
 
-            var providersPath = flags.GetValueOrDefault("providers", "DanbooruProviderList.xml");
+            var providersPath = GetProvidersPath(flags);
             var providers = LoadProviders(providersPath, out var loadError);
             if (loadError != null) { Console.Error.WriteLine(loadError); return 1; }
 
@@ -760,7 +779,7 @@ namespace DanbooruDownloader.Cli
             if (opts.HtmlIndex) TryGenerateHtmlIndex(opts.OutputDir, string.Join("+", providerNames), string.Join(" | ", jobLines));
 
             Console.WriteLine($"Batch complete. Jobs: {totalJobs}, Downloaded: {totalDownloaded}, Skipped: {totalSkipped}, Failed: {totalFailed}");
-            return 0;
+            return totalFailed > 0 && totalDownloaded == 0 ? 1 : 0;
         }
 
         // ---- providers ----
@@ -768,7 +787,7 @@ namespace DanbooruDownloader.Cli
         internal static async Task<int> RunProviders(string[] rest)
         {
             var flags = ParseFlags(rest.Length > 1 ? rest[1..] : Array.Empty<string>());
-            var providersPath = flags.GetValueOrDefault("providers", "DanbooruProviderList.xml");
+            var providersPath = GetProvidersPath(flags);
             var providers = LoadProviders(providersPath, out var loadError);
             if (loadError != null) { Console.Error.WriteLine(loadError); return 1; }
 
@@ -847,7 +866,7 @@ namespace DanbooruDownloader.Cli
 
         internal static async Task<int> RunTagsDownload(Dictionary<string, string> flags)
         {
-            var providersPath = flags.GetValueOrDefault("providers", "DanbooruProviderList.xml");
+            var providersPath = GetProvidersPath(flags);
             var providerName = flags.GetValueOrDefault("provider");
             if (string.IsNullOrWhiteSpace(providerName))
             {
@@ -905,7 +924,7 @@ namespace DanbooruDownloader.Cli
             var providerName = rest[1];
             var cookieValue = rest[2];
             var flags = ParseFlags(rest.Length > 3 ? rest[3..] : Array.Empty<string>());
-            var providersPath = flags.GetValueOrDefault("providers", "DanbooruProviderList.xml");
+            var providersPath = GetProvidersPath(flags);
 
             var providers = LoadProviders(providersPath, out var loadError);
             if (loadError != null) { Console.Error.WriteLine(loadError); return 1; }
@@ -948,7 +967,7 @@ namespace DanbooruDownloader.Cli
             var apiKeyValue = rest[2];
             var userValue = rest[3];
             var flags = ParseFlags(rest.Length > 4 ? rest[4..] : Array.Empty<string>());
-            var providersPath = flags.GetValueOrDefault("providers", "DanbooruProviderList.xml");
+            var providersPath = GetProvidersPath(flags);
 
             var providers = LoadProviders(providersPath, out var loadError);
             if (loadError != null) { Console.Error.WriteLine(loadError); return 1; }
@@ -997,7 +1016,7 @@ namespace DanbooruDownloader.Cli
 
         private static async Task<int> RunArtistAdd(Dictionary<string, string> flags, SqliteProvider db)
         {
-            var providersPath = flags.GetValueOrDefault("providers", "DanbooruProviderList.xml");
+            var providersPath = GetProvidersPath(flags);
             var providerName = flags.GetValueOrDefault("provider");
             var tag = flags.GetValueOrDefault("tags");
             var outputDir = flags.GetValueOrDefault("output");
@@ -1051,7 +1070,7 @@ namespace DanbooruDownloader.Cli
             db.TouchTrackedArtistRefreshed(provider.Name, tag);
 
             Console.WriteLine($"Done. Pages: {pages}, Downloaded: {downloaded}, Skipped: {skipped}, Failed: {failed}");
-            return 0;
+            return failed > 0 && downloaded == 0 ? 1 : 0;
         }
 
         /// <summary>
@@ -1074,7 +1093,7 @@ namespace DanbooruDownloader.Cli
                 return 1;
             }
 
-            var providersPath = flags.GetValueOrDefault("providers", "DanbooruProviderList.xml");
+            var providersPath = GetProvidersPath(flags);
             var providers = LoadProviders(providersPath, out var loadError);
             if (loadError != null) { Console.Error.WriteLine(loadError); return 1; }
 
@@ -1130,7 +1149,7 @@ namespace DanbooruDownloader.Cli
             }
 
             Console.WriteLine($"add-many complete. Artists added: {ok}, Failed: {failed}");
-            return 0;
+            return failed > 0 ? 1 : 0;
         }
 
         /// <summary>
@@ -1145,8 +1164,13 @@ namespace DanbooruDownloader.Cli
                 case "install":
                     {
                         var intervalHours = TryInt(flags.GetValueOrDefault("interval-hours")) ?? 24;
+                        if (intervalHours < 1)
+                        {
+                            Console.Error.WriteLine("--interval-hours must be at least 1.");
+                            return 1;
+                        }
                         var dbPath = Path.GetFullPath(flags.GetValueOrDefault("db", "downloaded.db"));
-                        var providersPath = Path.GetFullPath(flags.GetValueOrDefault("providers", "DanbooruProviderList.xml"));
+                        var providersPath = Path.GetFullPath(GetProvidersPath(flags));
                         var (ok, message) = Scheduling.LaunchdScheduler.Install(intervalHours, dbPath, providersPath, Directory.GetCurrentDirectory());
                         Console.WriteLine(message);
                         return ok ? 0 : 1;
@@ -1177,7 +1201,8 @@ namespace DanbooruDownloader.Cli
 
             foreach (var a in artists)
             {
-                var lastRefresh = a.LastRefreshedAt?.ToString("yyyy-MM-dd HH:mm") ?? "never";
+                // SQLite CURRENT_TIMESTAMP is UTC.
+                var lastRefresh = a.LastRefreshedAt?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "never";
                 Console.WriteLine($"[{a.ProviderName}] \"{a.Tag}\" -> {a.OutputDir}  (last refreshed: {lastRefresh})");
             }
             return 0;
@@ -1202,7 +1227,7 @@ namespace DanbooruDownloader.Cli
 
         private static async Task<int> RunArtistRefresh(Dictionary<string, string> flags, SqliteProvider db)
         {
-            var providersPath = flags.GetValueOrDefault("providers", "DanbooruProviderList.xml");
+            var providersPath = GetProvidersPath(flags);
             var providerName = flags.GetValueOrDefault("provider");
             var tag = flags.GetValueOrDefault("tags");
             var all = flags.ContainsKey("all");
@@ -1256,11 +1281,7 @@ namespace DanbooruDownloader.Cli
 
                 var opts = BuildDownloadOptions(artistFlags);
                 opts.OutputDir = artist.OutputDir;
-                if (artist.FilenameFormat != null)
-                {
-                    opts.FilenameFormatStr = artist.FilenameFormat;
-                }
-                else if (!artistFlags.ContainsKey("filename-format"))
+                if (!artistFlags.ContainsKey("filename-format"))
                 {
                     // Same reasoning as AddOneArtist: --output is already this artist's own
                     // folder, so don't also nest by %searchtag% inside it.
@@ -1268,7 +1289,7 @@ namespace DanbooruDownloader.Cli
                 }
                 opts.HtmlIndex = !flags.ContainsKey("no-html-index");
 
-                var (downloaded, skipped, failed, pages) = await DownloadGalleryAsync(client, db, provider, artist.Tag, artistFlags, opts, maxPages);
+                var (downloaded, skipped, failed, pages) = await DownloadGalleryAsync(client, db, provider, artist.Tag, artistFlags, opts, maxPages, stopWhenCaughtUp: true);
                 db.TouchTrackedArtistRefreshed(provider.Name, artist.Tag);
                 totalDownloaded += downloaded;
                 totalFailed += failed;
@@ -1277,7 +1298,7 @@ namespace DanbooruDownloader.Cli
             }
 
             Console.WriteLine($"Refresh complete. Artists: {targets.Count}, New downloads: {totalDownloaded}, Failed: {totalFailed}");
-            return 0;
+            return totalFailed > 0 && totalDownloaded == 0 ? 1 : 0;
         }
     }
 }
