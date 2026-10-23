@@ -18,6 +18,7 @@
 
   <ItemGroup>
     <None Include="DanbooruProviderList.xml" CopyToOutputDirectory="PreserveNewest" />
+    <None Include=".env" CopyToOutputDirectory="PreserveNewest" Condition="Exists('.env')" />
   </ItemGroup>
 
 </Project>

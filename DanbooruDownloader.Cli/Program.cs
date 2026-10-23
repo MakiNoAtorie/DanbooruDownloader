@@ -112,6 +112,13 @@ namespace DanbooruDownloader.Cli
                 danboo apikey set <provider> <api-key> <username-or-user-id> [--providers <path>]
                 danboo tags download --provider <name> [--output tags.xml] [options]
 
+                Credentials can also live in a .env file (working directory, or next to the binary),
+                kept out of DanbooruProviderList.xml. NAME is the provider name upper-cased, other
+                characters as "_" (gelbooru.com -> GELBOORU_COM):
+                  NAME_API_KEY=...  NAME_USER=...   API-key login (USER: Danbooru username / Gelbooru user ID)
+                  NAME_COOKIE=...                   cookie login
+                Environment variables of the same names take precedence over the file.
+
                 Common options:
                   --provider <name>     Provider name from DanbooruProviderList.xml (required for search/download)
                   --tags <tags>         Space-separated tag query
@@ -219,12 +226,16 @@ namespace DanbooruDownloader.Cli
 
         // ---- shared: providers, search params, fetching, downloading ----
 
-        internal static List<DanbooruProvider> LoadProviders(string providersPath, out string error)
+        /// <param name="withEnvCredentials">False for commands that save the list back, so
+        /// secrets from .env are never written into DanbooruProviderList.xml.</param>
+        internal static List<DanbooruProvider> LoadProviders(string providersPath, out string error, bool withEnvCredentials = true)
         {
             error = null;
             try
             {
-                return new DanbooruProviderDao().Read(providersPath);
+                var providers = new DanbooruProviderDao().Read(providersPath);
+                if (withEnvCredentials) EnvFile.Apply(providers, EnvFile.DefaultPath);
+                return providers;
             }
             catch (Exception ex)
             {
@@ -845,7 +856,9 @@ namespace DanbooruDownloader.Cli
                 Console.WriteLine($"BoardType:     {provider.BoardType}");
                 Console.WriteLine($"Preferred:     {provider.Preferred}");
                 Console.WriteLine($"LoginType:     {provider.LoginType}");
-                Console.WriteLine($"UserName:      {provider.UserName}");
+                // For cookie logins UserName holds the cookie, a credential.
+                var userName = provider.LoginType is LoginType.Cookie or LoginType.CookieAlwaysAsk && !string.IsNullOrEmpty(provider.UserName) ? "(cookie set)" : provider.UserName;
+                Console.WriteLine($"UserName:      {userName}");
                 Console.WriteLine($"ApiKey:        {(string.IsNullOrEmpty(provider.ApiKey) ? "(none)" : "(set)")}");
                 Console.WriteLine($"DefaultLimit:  {provider.DefaultLimit}");
                 Console.WriteLine($"HardLimit:     {provider.HardLimit}");
@@ -967,7 +980,7 @@ namespace DanbooruDownloader.Cli
             var flags = ParseFlags(rest.Length > 3 ? rest[3..] : Array.Empty<string>());
             var providersPath = GetProvidersPath(flags);
 
-            var providers = LoadProviders(providersPath, out var loadError);
+            var providers = LoadProviders(providersPath, out var loadError, withEnvCredentials: false);
             if (loadError != null) { Console.Error.WriteLine(loadError); return 1; }
 
             var provider = FindProvider(providers, providerName);
@@ -1010,7 +1023,7 @@ namespace DanbooruDownloader.Cli
             var flags = ParseFlags(rest.Length > 4 ? rest[4..] : Array.Empty<string>());
             var providersPath = GetProvidersPath(flags);
 
-            var providers = LoadProviders(providersPath, out var loadError);
+            var providers = LoadProviders(providersPath, out var loadError, withEnvCredentials: false);
             if (loadError != null) { Console.Error.WriteLine(loadError); return 1; }
 
             var provider = FindProvider(providers, providerName);
