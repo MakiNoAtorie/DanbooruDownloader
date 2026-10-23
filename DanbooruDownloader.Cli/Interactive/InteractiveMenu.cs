@@ -148,13 +148,14 @@ namespace DanbooruDownloader.Cli.Interactive
 
         private static string RatingPrompt()
         {
-            Console.WriteLine("  1) any   2) safe   3) questionable   4) explicit");
+            Console.WriteLine("  1) any   2) safe   3) questionable   4) explicit   5) sensitive (Danbooru/Gelbooru only)");
             var choice = Prompt("Rating", "1");
             return choice switch
             {
                 "2" => "safe",
                 "3" => "questionable",
                 "4" => "explicit",
+                "5" => "sensitive",
                 _ => "",
             };
         }

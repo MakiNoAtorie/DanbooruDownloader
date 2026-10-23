@@ -29,34 +29,46 @@ namespace DanbooruDownloader.Cli.Net
             {
                 Timeout = TimeSpan.FromMilliseconds(config.TimeoutMs),
             };
-            _client.DefaultRequestHeaders.UserAgent.ParseAdd(config.UserAgent);
             _client.DefaultRequestHeaders.AcceptLanguage.ParseAdd(config.AcceptLanguage);
         }
 
-        public async Task<Stream> GetStreamAsync(string url, string referer = null)
+        // The User-Agent is per request: one client serves several providers in a batch, and
+        // each needs its own (see DanbooruProvider.UserAgent).
+        private static HttpRequestMessage CreateRequest(string url, string referer, string userAgent)
         {
-            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.UserAgent.ParseAdd(userAgent ?? CliConfig.ApiUserAgent);
             if (!string.IsNullOrWhiteSpace(referer))
             {
                 request.Headers.Referrer = new Uri(referer);
             }
-
-            var response = await _client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
-            // Don't throw on a non-2xx status here: Cloudflare's bot-challenge page (and some
-            // provider error pages) come back with readable HTML body content that
-            // DanbooruPostDao already knows how to detect and report clearly (see
-            // Helper.CLOUDFLARE_STR/DDOS_STR) - throwing here would hide that behind a bare
-            // "403 Forbidden" instead.
-            return await response.Content.ReadAsStreamAsync();
+            return request;
         }
 
-        public async Task DownloadFileAsync(string url, string destinationPath, string referer = null)
+        /// <summary>
+        /// Fetch an API/listing response into memory. Only for small responses, not files.
+        /// </summary>
+        public async Task<Stream> GetStreamAsync(string url, string referer = null, string userAgent = null)
         {
-            using var request = new HttpRequestMessage(HttpMethod.Get, url);
-            if (!string.IsNullOrWhiteSpace(referer))
+            using var request = CreateRequest(url, referer, userAgent);
+            using var response = await _client.SendAsync(request);
+            var body = await response.Content.ReadAsByteArrayAsync();
+            // A non-2xx status with a body is not thrown here: Cloudflare's challenge page and
+            // provider error pages carry the readable reason that DanbooruPostDao reports.
+            // With no body there is nothing to report but the status.
+            if (!response.IsSuccessStatusCode && body.Length == 0)
             {
-                request.Headers.Referrer = new Uri(referer);
+                var hint = response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden
+                    ? " - this provider may require an API key (danboo apikey set ...) or a cookie (danboo cookie set ...)"
+                    : "";
+                throw new HttpRequestException($"HTTP {(int)response.StatusCode} {response.ReasonPhrase}{hint}");
             }
+            return new MemoryStream(body);
+        }
+
+        public async Task DownloadFileAsync(string url, string destinationPath, string referer = null, string userAgent = null)
+        {
+            using var request = CreateRequest(url, referer, userAgent);
 
             using var response = await _client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
             response.EnsureSuccessStatusCode();

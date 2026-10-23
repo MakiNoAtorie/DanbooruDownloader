@@ -82,7 +82,7 @@ namespace DanbooruDownloader.Cli.Tags
                 log($"GET {Helper.RemoveAuthInfo(url)}");
 
                 string rawXml;
-                using (var stream = await client.GetStreamAsync(url))
+                using (var stream = await client.GetStreamAsync(url, userAgent: provider.UserAgent))
                 using (var reader = new StreamReader(stream))
                 {
                     rawXml = await reader.ReadToEndAsync();

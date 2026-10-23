@@ -67,6 +67,14 @@ namespace DanbooruDownloader.Cli.Entity
 
         public string DateTimeFormat { get; set; }
 
+        public string UserAgent => LoginType is LoginType.Cookie or LoginType.CookieAlwaysAsk
+            ? Config.CliConfig.BrowserUserAgent
+            : Config.CliConfig.ApiUserAgent;
+
+        // Danbooru (donmai.us) and gelbooru.com rate posts general/sensitive/questionable/explicit,
+        // and there "rating:safe" means sensitive. Other boards still use safe/questionable/explicit.
+        public bool UsesGeneralSensitiveRatings => Url != null && (Url.Contains("donmai.us") || Url.Contains("gelbooru.com"));
+
         public override string ToString()
         {
             return Name;

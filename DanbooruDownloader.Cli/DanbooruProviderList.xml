@@ -2,12 +2,12 @@
 <DanbooruProviderList>
   <DanbooruProvider>
     <Name>danbooru</Name>
-    <DefaultLimit>20</DefaultLimit>
-    <HardLimit>1000</HardLimit>
-    <Preferred>Xml</Preferred>
-    <QueryStringXml>/post/index.xml?%_query%</QueryStringXml>
-    <QueryStringJson>/post/index.json?%_query%</QueryStringJson>
-    <QueryStringHtml>/post/index?%_query%</QueryStringHtml>
+    <DefaultLimit>100</DefaultLimit>
+    <HardLimit>200</HardLimit>
+    <Preferred>Json</Preferred>
+    <QueryStringXml>/posts.xml?%_query%</QueryStringXml>
+    <QueryStringJson>/posts.json?%_query%</QueryStringJson>
+    <QueryStringHtml>/posts?%_query%</QueryStringHtml>
     <Url>https://danbooru.donmai.us</Url>
     <UserName />
     <Password />
@@ -146,11 +146,11 @@
   </DanbooruProvider>
   <DanbooruProvider>
     <Name>e621 (Furry)</Name>
-    <DefaultLimit>20</DefaultLimit>
-    <HardLimit>100</HardLimit>
+    <DefaultLimit>100</DefaultLimit>
+    <HardLimit>320</HardLimit>
     <Preferred>Json</Preferred>
-    <QueryStringXml>/post/index.xml?%_query%</QueryStringXml>
-    <QueryStringJson>/post/index.json?%_query%</QueryStringJson>
+    <QueryStringXml />
+    <QueryStringJson>/posts.json?%_query%</QueryStringJson>
     <QueryStringHtml />
     <Url>https://e621.net</Url>
     <UserName />
@@ -182,21 +182,21 @@
   </DanbooruProvider>
   <DanbooruProvider>
     <Name>hypnohub.net</Name>
-    <DefaultLimit>0</DefaultLimit>
-    <HardLimit>0</HardLimit>
-    <Preferred>Json</Preferred>
-    <QueryStringXml>/post/index.xml?%_query%</QueryStringXml>
-    <QueryStringJson>/post/index.json?%_query%</QueryStringJson>
-    <QueryStringHtml>/post/index?%_query%</QueryStringHtml>
+    <DefaultLimit>100</DefaultLimit>
+    <HardLimit>1000</HardLimit>
+    <Preferred>Xml</Preferred>
+    <QueryStringXml>/index.php?page=dapi&amp;s=post&amp;q=index&amp;%_query%</QueryStringXml>
+    <QueryStringJson />
+    <QueryStringHtml>/index.php?page=post&amp;s=list&amp;%_query%</QueryStringHtml>
     <Url>https://hypnohub.net</Url>
     <UserName />
     <Password />
     <LoginType>Anonymous</LoginType>
     <PasswordSalt />
     <PasswordHash />
-    <BoardType>Danbooru</BoardType>
+    <BoardType>Gelbooru</BoardType>
     <TagDownloadUseLoop>false</TagDownloadUseLoop>
-    <DateTimeFormat>unix-timestamp</DateTimeFormat>
+    <DateTimeFormat>ddd MMM dd HH:mm:ss zzz yyyy</DateTimeFormat>
   </DanbooruProvider>
   <DanbooruProvider>
     <Name>tbib.org</Name>
@@ -272,12 +272,12 @@
   </DanbooruProvider>
   <DanbooruProvider>
     <Name>hijiribe</Name>
-    <DefaultLimit>20</DefaultLimit>
-    <HardLimit>1000</HardLimit>
-    <Preferred>Xml</Preferred>
-    <QueryStringXml>/post/index.xml?%_query%</QueryStringXml>
-    <QueryStringJson>/post/index.json?%_query%</QueryStringJson>
-    <QueryStringHtml>/post/index?%_query%</QueryStringHtml>
+    <DefaultLimit>100</DefaultLimit>
+    <HardLimit>200</HardLimit>
+    <Preferred>Json</Preferred>
+    <QueryStringXml>/posts.xml?%_query%</QueryStringXml>
+    <QueryStringJson>/posts.json?%_query%</QueryStringJson>
+    <QueryStringHtml>/posts?%_query%</QueryStringHtml>
     <Url>https://hijiribe.donmai.us</Url>
     <UserName />
     <Password />

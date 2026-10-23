@@ -324,98 +324,10 @@ namespace DanbooruDownloader.Cli.DAO
 
         public void ReadJSON(string rawData, DanbooruPostDaoOption option)
         {
-            Posts = new List<DanbooruPost>();
-            ActualCount = 0;
-            ProcessJson(rawData);
             RawData = rawData;
-        }
-
-        private void ProcessJson(String json)
-        {
-            if (json.Length < 4) return;
-
-            if (json.StartsWith("{"))
-            {
-                json = json.Substring(1, json.Length - 2);
-                string[] splitter = { "\"," };
-                string[] node = json.Split(splitter, StringSplitOptions.None);
-                foreach (string str2 in node)
-                {
-                    string[] val = str2.Split(':');
-                    switch (val[0].ToLowerInvariant())
-                    {
-                        case "\"reason\"": ResponseMessage = val[1].Replace("\"", ""); break;
-                        case "\"success\"": Success = bool.Parse(val[1].Replace("\"", "").Trim()); break;
-                    }
-                }
-                SetErrorIfFailed();
-                return;
-            }
-
-            json = json.Substring(2, json.Length - 4);
-            string[] itemSplitter = { "},{" };
-            string[] split = json.Split(itemSplitter, StringSplitOptions.None);
-
-            foreach (string str in split)
-            {
-                DanbooruPost post = new DanbooruPost();
-                string[] node = str.Split(',');
-                foreach (string str2 in node)
-                {
-                    char[] splitter2 = { ':' };
-                    string[] val = str2.Split(splitter2, 2);
-                    switch (val[0].ToLowerInvariant())
-                    {
-                        case "\"id\"": post.Id = val[1].Replace("\"", ""); break;
-                        case "\"tags\"":
-                            post.Tags = val[1].Replace("\"", "");
-                            post.Tags = Helper.DecodeEncodedNonAsciiCharacters(post.Tags);
-                            post.TagsEntity = Helper.ParseTags(post.Tags, Option.Provider);
-                            break;
-                        case "\"source\"": post.Source = val[1].Replace("\"", ""); break;
-                        case "\"creator_id\"": post.CreatorId = val[1].Replace("\"", ""); break;
-                        case "\"file_url\"": post.FileUrl = AppendHttp(val[1].Replace("\"", "")); break;
-                        case "\"width\"": TryConvertInt(val[1], v => post.Width = v); break;
-                        case "\"height\"": TryConvertInt(val[1], v => post.Height = v); break;
-                        case "\"score\"": post.Score = val[1]; break;
-                        case "\"rating\"": post.Rating = val[1].Replace("\"", ""); break;
-                        case "\"md5\"": post.MD5 = val[1].Replace("\"", ""); break;
-                        case "\"preview_url\"": post.PreviewUrl = AppendHttp(val[1].Replace("\"", "")); break;
-                        case "\"preview_width\"": TryConvertInt(val[1], v => post.PreviewWidth = v); break;
-                        case "\"preview_height\"": TryConvertInt(val[1], v => post.PreviewHeight = v); break;
-                        case "\"file_size\"": TryConvertInt(val[1], v => post.Filesize = v); break;
-                        case "\"parent_id\"": post.ParentId = val[1]; break;
-                        case "\"status\"": post.Status = val[1]; break;
-                        case "\"created_at\"":
-                            post.CreatedAt = val[1];
-                            post.CreatedAtDateTime = ParseDateTime(post.CreatedAt, Option.Provider);
-                            break;
-                        case "\"has_children\"":
-                            post.HasChildren = false;
-                            try { post.HasChildren = Convert.ToBoolean(val[1]); } catch (Exception) { }
-                            break;
-                        case "\"sample_width\"": TryConvertInt(val[1], v => post.SampleWidth = v); break;
-                        case "\"sample_height\"": TryConvertInt(val[1], v => post.SampleHeight = v); break;
-                        case "\"sample_url\"": post.SampleUrl = AppendHttp(val[1].Replace("\"", "")); break;
-                        case "\"jpeg_width\"": TryConvertInt(val[1], v => post.JpegWidth = v); break;
-                        case "\"jpeg_height\"": TryConvertInt(val[1], v => post.JpegHeight = v); break;
-                        case "\"jpeg_url\"": post.JpegUrl = AppendHttp(val[1].Replace("\"", "")); break;
-                    }
-                }
-                post.Hidden = Helper.CheckBlacklistedTag(post, Option);
-                post.Provider = Option.Provider;
-                post.Query = Option.Query;
-                post.SearchTags = Option.SearchTags;
-                post.Referer = Option.Provider.Url + @"/post/show/" + post.Id;
-                this.Posts.Add(post);
-                ActualCount++;
-            }
-        }
-
-        private static void TryConvertInt(string value, Action<int> assign)
-        {
-            assign(-1);
-            try { assign(Convert.ToInt32(value)); } catch (Exception) { }
+            Posts = DanbooruJsonParser.Parse(rawData, option, out var error);
+            ActualCount = Posts.Count;
+            if (error != null) errorMessage = error;
         }
 
         private string AppendHttp(string url)

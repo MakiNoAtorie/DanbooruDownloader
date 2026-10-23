@@ -115,7 +115,8 @@ namespace DanbooruDownloader.Cli
                 Common options:
                   --provider <name>     Provider name from DanbooruProviderList.xml (required for search/download)
                   --tags <tags>         Space-separated tag query
-                  --rating <r>          safe | questionable | explicit
+                  --rating <r>          safe | questionable | explicit, or sensitive on Danbooru/Gelbooru
+                                        (where "safe" is sent as "general")
                   --not-rating          Negate --rating
                   --limit <n>           Max results per job/page
                   --page <n>            Page number
@@ -239,24 +240,41 @@ namespace DanbooruDownloader.Cli
 
         private static DanbooruSearchParam BuildSearchParam(DanbooruProvider provider, string tag, Dictionary<string, string> flags)
         {
-            var rating = flags.GetValueOrDefault("rating");
-            // Accept short forms (safe/questionable/explicit) as well as the raw
-            // "rating:x" meta-tag the original app's dropdown values used internally.
-            if (!string.IsNullOrWhiteSpace(rating) && !rating.Contains(':'))
-            {
-                rating = "rating:" + rating;
-            }
             var searchParam = new DanbooruSearchParam
             {
                 Provider = provider,
                 Tag = tag,
-                Rating = rating,
+                Rating = NormalizeRating(flags.GetValueOrDefault("rating"), provider),
                 IsNotRating = flags.ContainsKey("not-rating"),
-                Limit = TryInt(flags.GetValueOrDefault("limit")) ?? provider.DefaultLimit,
+                Limit = ClampLimit(TryInt(flags.GetValueOrDefault("limit")) ?? provider.DefaultLimit, provider),
                 Page = TryInt(flags.GetValueOrDefault("page")),
             };
             searchParam.Option = BuildOption(provider, tag, flags);
             return searchParam;
+        }
+
+        /// <summary>
+        /// Accepts short forms (safe/general/sensitive/questionable/explicit) or a raw
+        /// "rating:x" meta-tag. On boards with general/sensitive ratings, "safe" maps to
+        /// "general": there "rating:safe" is an alias for sensitive, the opposite of the intent.
+        /// </summary>
+        internal static string NormalizeRating(string rating, DanbooruProvider provider)
+        {
+            if (string.IsNullOrWhiteSpace(rating)) return null;
+            rating = rating.Trim().ToLowerInvariant();
+            if (rating.StartsWith("rating:")) rating = rating["rating:".Length..];
+            if (provider.UsesGeneralSensitiveRatings && rating == "safe") rating = "general";
+            return "rating:" + rating;
+        }
+
+        private static int ClampLimit(int limit, DanbooruProvider provider)
+        {
+            if (provider.HardLimit > 0 && limit > provider.HardLimit)
+            {
+                Logger.Warn($"--limit {limit} is above {provider.Name}'s maximum, using {provider.HardLimit}.");
+                return provider.HardLimit;
+            }
+            return limit;
         }
 
         private static DanbooruPostDaoOption BuildOption(DanbooruProvider provider, string tag, Dictionary<string, string> flags)
@@ -299,7 +317,7 @@ namespace DanbooruDownloader.Cli
             {
                 try
                 {
-                    using var stream = await client.GetStreamAsync(url);
+                    using var stream = await client.GetStreamAsync(url, userAgent: provider.UserAgent);
                     var dao = new DanbooruPostDao(stream, searchParam.Option, searchParam.Page);
                     if (!dao.HasError) return (dao, null);
                     lastError = dao.ErrorMessage;
@@ -323,6 +341,15 @@ namespace DanbooruDownloader.Cli
             string extension = fileUrl.Contains('?') ? fileUrl[..fileUrl.IndexOf('?')] : fileUrl;
             extension = Path.GetExtension(extension);
             return string.IsNullOrWhiteSpace(extension) ? ".jpg" : extension;
+        }
+
+        // Without a known MD5 there is nothing to compare, so assume it is the same file.
+        internal static bool FileMatchesMd5(string path, string md5)
+        {
+            if (string.IsNullOrWhiteSpace(md5)) return true;
+            using var stream = File.OpenRead(path);
+            var hash = Convert.ToHexString(System.Security.Cryptography.MD5.HashData(stream));
+            return string.Equals(hash, md5, StringComparison.OrdinalIgnoreCase);
         }
 
         private static void TryGenerateHtmlIndex(string outputDir, string providerName, string tag)
@@ -459,6 +486,13 @@ namespace DanbooruDownloader.Cli
 
                 var baseFilename = Helper.MakeFilename(filenameFormat, post);
                 var fullPath = baseFilename + extension;
+                // Another post can produce the same name (formats without %id%, or %id% cut
+                // off by the length limit). Trust an existing file only if its MD5 matches;
+                // otherwise keep both by adding the post id.
+                if (File.Exists(fullPath) && !FileMatchesMd5(fullPath, post.MD5))
+                {
+                    fullPath = $"{baseFilename} - {post.Id}{extension}";
+                }
 
                 if (!opts.Force && File.Exists(fullPath))
                 {
@@ -481,7 +515,7 @@ namespace DanbooruDownloader.Cli
                 {
                     try
                     {
-                        await client.DownloadFileAsync(post.FileUrl, fullPath, referer: post.Referer);
+                        await client.DownloadFileAsync(post.FileUrl, fullPath, referer: post.Referer, userAgent: provider.UserAgent);
                         success = true;
                         break;
                     }
@@ -844,7 +878,7 @@ namespace DanbooruDownloader.Cli
                 string status;
                 try
                 {
-                    using var stream = await client.GetStreamAsync(p.Url);
+                    using var stream = await client.GetStreamAsync(p.Url, userAgent: p.UserAgent);
                     using var reader = new StreamReader(stream);
                     var body = await reader.ReadToEndAsync();
 
@@ -882,6 +916,13 @@ namespace DanbooruDownloader.Cli
             {
                 Console.Error.WriteLine($"Provider '{providerName}' not found in {providersPath}.");
                 return 1;
+            }
+
+            // Danbooru 2 and e621 send tag categories with every post (see DanbooruJsonParser).
+            if (provider.Preferred == PreferredMethod.Json && provider.QueryStringJson?.Contains("/posts.json") == true)
+            {
+                Console.WriteLine($"Not needed: {provider.Name} sends tag categories with every post, so %artist%/%character%/%copyright% already resolve.");
+                return 0;
             }
 
             var output = flags.GetValueOrDefault("output", "tags.xml");
