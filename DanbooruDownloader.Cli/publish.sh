@@ -1,14 +1,21 @@
 #!/bin/bash
-# Builds a self-contained, single-file "danboo" binary for this Mac - no `dotnet run`, no
-# .NET runtime install required to run it afterwards.
+# Builds a self-contained, single-file "danboo" binary for this machine (macOS, Linux, or
+# Windows under Git Bash) - no `dotnet run`, no .NET runtime install required to run it.
 #
 # Usage:
-#   ./publish.sh                 # builds ./publish/danboo for this machine's architecture
-#   sudo cp publish/danboo /usr/local/bin/danboo   # (optional) put it on your PATH
+#   ./publish.sh                 # builds ./publish/danboo (danboo.exe on Windows)
+#   ./publish.sh linux-x64       # or name another .NET runtime identifier
 set -euo pipefail
 cd "$(dirname "$0")"
 
-RID=$(uname -m | grep -q arm64 && echo osx-arm64 || echo osx-x64)
+ARCH=$(uname -m | grep -qE 'arm64|aarch64' && echo arm64 || echo x64)
+case "$(uname -s)" in
+  Darwin) OS=osx ;;
+  Linux) OS=linux ;;
+  MINGW*|MSYS*|CYGWIN*) OS=win ;;
+  *) echo "Unknown OS; pass a runtime identifier, e.g. ./publish.sh linux-x64" >&2; exit 1 ;;
+esac
+RID=${1:-$OS-$ARCH}
 
 dotnet publish -c Release -r "$RID" \
   --self-contained true \
@@ -17,6 +24,8 @@ dotnet publish -c Release -r "$RID" \
   -o ./publish
 
 echo
-echo "Built: $(pwd)/publish/danboo"
+echo "Built for $RID: $(pwd)/publish"
 echo "Try it:      ./publish/danboo --help"
-echo "Install it:  sudo cp publish/danboo /usr/local/bin/danboo"
+if [[ "$RID" != win-* ]]; then
+  echo "Install it:  sudo cp publish/danboo /usr/local/bin/danboo"
+fi

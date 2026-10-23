@@ -1,3 +1,5 @@
+using DanbooruDownloader.Cli.Config;
+using DanbooruDownloader.Cli.Data;
 using DanbooruDownloader.Cli.Entity;
 using System;
 using System.Collections.Generic;
@@ -8,73 +10,56 @@ using System.Threading.Tasks;
 namespace DanbooruDownloader.Cli.Interactive
 {
     /// <summary>
-    /// A numbered-menu front end over the existing flag-based commands - launched when
-    /// "danboo" is run with no arguments, so double-clicking a launcher (or just typing
-    /// "danboo") gives a usable prompt-driven experience instead of a bare usage dump.
-    /// Every option here just builds the same flags dictionary the CLI parser would and
-    /// calls straight into Program's existing Run* methods - no separate logic to keep
-    /// in sync.
+    /// A numbered-menu front end over the flag-based commands - launched when "danboo" is run
+    /// with no arguments. Every action builds a command line, shows it, and runs it through
+    /// Program.RunCommand, so the menu has no separate logic to keep in sync and teaches the
+    /// equivalent command as it goes.
     /// </summary>
     public static class InteractiveMenu
     {
-        // These are internal bookkeeping files (the provider config, the dedup/tracking
-        // database), not a meaningful choice for someone using the menu - there's only ever
-        // one of each sitting next to the app, so asking about them on every action was pure
-        // friction (and the source of a real bug: a "0" meant for a submenu's "Back" choice
-        // could land on one of these prompts instead, crashing with "Failed to read providers
-        // from 0: Could not find file..."). Silently default instead of asking; anyone who
-        // genuinely needs a different path still has the flag-based commands (--providers,
-        // --db) for that.
-        private const string DefaultDbPath = "downloaded.db";
-
-        private static string GetProvidersPath() => Program.DefaultProvidersPath;
-        private static string GetDbPath() => DefaultDbPath;
+        private static UserSettings _settings = new UserSettings();
 
         public static async Task<int> RunAsync()
         {
-            Console.WriteLine("DanbooruDownloader CLI - interactive mode");
-            Console.WriteLine("(full flag reference: danboo --help)");
+            _settings = UserSettings.Load();
+            Ui.Heading("DanbooruDownloader - interactive mode");
+            Ui.Dim("Press Enter to accept the value in [brackets]. \"danboo --help\" lists the commands.");
 
             while (true)
             {
                 Console.WriteLine();
-                Console.WriteLine("1) Search");
-                Console.WriteLine("2) Download");
-                Console.WriteLine("3) Batch download (from a jobs file)");
-                Console.WriteLine("4) Tracked artists (add / list / remove / refresh)");
-                Console.WriteLine("5) Providers (list / show / check)");
-                Console.WriteLine("6) Set a cookie for a provider");
-                Console.WriteLine("7) Set an API key for a provider");
-                Console.WriteLine("8) Download tags.xml (enables %artist%/%character% filenames)");
-                Console.WriteLine("9) Scheduled auto-refresh (launchd)");
+                Console.WriteLine("1) Download");
+                Console.WriteLine("2) Search");
+                Console.WriteLine("3) Refresh tracked artists");
+                Console.WriteLine("4) Tracked artists (add, list, refresh one, remove)");
+                Console.WriteLine("5) Batch download from a file");
+                Console.WriteLine("6) Settings (sites, logins, automatic refresh, tag names)");
                 Console.WriteLine("0) Exit");
-
-                var choice = Prompt("Choose an option", "0");
 
                 try
                 {
-                    switch (choice)
+                    switch (Prompt("Choose", "1"))
                     {
-                        case "1": await DoSearch(); break;
-                        case "2": await DoDownload(); break;
-                        case "3": await DoBatch(); break;
+                        case "1": await DoDownload(); break;
+                        case "2": await DoSearch(); break;
+                        case "3": await Run(new List<string> { "artist", "refresh" }, confirm: false); break;
                         case "4": await DoArtistMenu(); break;
-                        case "5": await DoProvidersMenu(); break;
-                        case "6": await DoCookie(); break;
-                        case "7": DoApiKey(); break;
-                        case "8": await DoTagsDownload(); break;
-                        case "9": await DoScheduleMenu(); break;
+                        case "5": await DoBatch(); break;
+                        case "6": await DoSettingsMenu(); break;
                         case "0": case "q": case "exit": case "quit":
-                            Console.WriteLine("Bye.");
                             return 0;
                         default:
                             Console.WriteLine("Not a valid option.");
                             break;
                     }
                 }
+                catch (EndOfStreamException)
+                {
+                    return 0;
+                }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine($"Error: {ex.Message}");
+                    Ui.Error($"Error: {ex.Message}");
                 }
             }
         }
@@ -85,18 +70,16 @@ namespace DanbooruDownloader.Cli.Interactive
         {
             Console.Write(string.IsNullOrEmpty(defaultValue) ? $"{label}: " : $"{label} [{defaultValue}]: ");
             var input = Console.ReadLine();
+            // Closed stdin returns null forever; stop instead of looping.
+            if (input == null) throw new EndOfStreamException("Input closed.");
             return string.IsNullOrWhiteSpace(input) ? defaultValue : input.Trim();
         }
 
-        private static string PromptRequired(string label)
+        private static string PromptRequired(string label, string defaultValue = "")
         {
             while (true)
             {
-                Console.Write($"{label}: ");
-                var input = Console.ReadLine();
-                // Closed stdin returns null forever; stop instead of looping.
-                if (input == null) throw new EndOfStreamException("Input closed.");
-                var value = input.Trim();
+                var value = Prompt(label, defaultValue);
                 if (!string.IsNullOrWhiteSpace(value)) return value;
                 Console.WriteLine("This is required.");
             }
@@ -104,339 +87,280 @@ namespace DanbooruDownloader.Cli.Interactive
 
         private static bool Confirm(string label, bool defaultValue)
         {
-            var suffix = defaultValue ? "Y/n" : "y/N";
-            var input = Prompt($"{label} ({suffix})");
+            var input = Prompt($"{label} ({(defaultValue ? "Y/n" : "y/N")})");
             if (string.IsNullOrWhiteSpace(input)) return defaultValue;
-            return input.Equals("y", StringComparison.OrdinalIgnoreCase) || input.Equals("yes", StringComparison.OrdinalIgnoreCase);
+            return input.StartsWith("y", StringComparison.OrdinalIgnoreCase);
         }
 
-        private static void SetIfNotEmpty(Dictionary<string, string> flags, string key, string value)
+        /// <summary>Shows numbered options on one line and returns the chosen index.</summary>
+        private static int Choose(string label, string[] options, int defaultIndex = 0)
         {
-            if (!string.IsNullOrWhiteSpace(value)) flags[key] = value;
-        }
-
-        /// <summary>
-        /// Lists providers with numbers so the user can pick "3" instead of typing an exact
-        /// name; also accepts a name typed directly.
-        /// </summary>
-        private static DanbooruProvider PickProvider(List<DanbooruProvider> providers)
-        {
-            for (int i = 0; i < providers.Count; i++)
-            {
-                Console.WriteLine($"  {i + 1,3}) {providers[i].Name}");
-            }
-
+            Console.WriteLine("  " + string.Join("   ", options.Select((o, i) => $"{i + 1}) {o}")));
             while (true)
             {
-                var input = PromptRequired("Provider (number or name)");
-                if (int.TryParse(input, out var index) && index >= 1 && index <= providers.Count)
-                {
-                    return providers[index - 1];
-                }
-                var byName = Program.FindProvider(providers, input);
-                if (byName != null) return byName;
-                Console.WriteLine("Not found - try again.");
+                if (int.TryParse(Prompt(label, (defaultIndex + 1).ToString()), out var n) && n >= 1 && n <= options.Length) return n - 1;
+                Console.WriteLine("Not a valid option.");
             }
         }
 
-        private static List<DanbooruProvider> LoadProvidersOrThrow(string providersPath)
+        /// <summary>Shows the command line, asks to start it, then runs it like typed arguments.</summary>
+        private static async Task Run(List<string> args, bool confirm = true)
         {
-            var providers = Program.LoadProviders(providersPath, out var error);
+            Ui.Dim("> " + Flags.ToCommandLine(args));
+            if (confirm && !Confirm("Start", true)) return;
+            Console.WriteLine();
+            await Program.RunCommand(args.ToArray());
+        }
+
+        private static List<DanbooruProvider> LoadProviders()
+        {
+            var providers = Program.LoadProviders(Program.DefaultProvidersPath, out var error);
             if (error != null) throw new InvalidOperationException(error);
             return providers;
         }
 
-        private static string RatingPrompt()
+        /// <summary>Numbered providers in columns; takes a number or (part of) a name, defaulting to the last one used.</summary>
+        private static DanbooruProvider PickProvider(List<DanbooruProvider> providers)
         {
-            Console.WriteLine("  1) any   2) safe   3) questionable   4) explicit   5) sensitive (Danbooru/Gelbooru only)");
-            var choice = Prompt("Rating", "1");
-            return choice switch
+            var cellWidth = providers.Max(p => p.Name.Length) + 7;
+            var columns = Math.Clamp(Math.Min(Ui.Width, 160) / cellWidth, 1, 4);
+            for (int i = 0; i < providers.Count; i += columns)
             {
-                "2" => "safe",
-                "3" => "questionable",
-                "4" => "explicit",
-                "5" => "sensitive",
-                _ => "",
-            };
+                Console.WriteLine(string.Concat(providers.Skip(i).Take(columns).Select((p, j) => $"  {i + j + 1,2}) {p.Name}".PadRight(cellWidth))).TrimEnd());
+            }
+
+            var last = Program.FindProvider(providers, _settings.LastProvider);
+            while (true)
+            {
+                var input = PromptRequired("Site (number or name)", last?.Name ?? "");
+                var provider = int.TryParse(input, out var index) && index >= 1 && index <= providers.Count
+                    ? providers[index - 1]
+                    : null;
+                var matches = provider != null ? new List<DanbooruProvider> { provider } : Program.MatchProviders(providers, input);
+                if (matches.Count == 1)
+                {
+                    _settings.LastProvider = matches[0].Name;
+                    _settings.Save();
+                    if (Program.LoginMissing(matches[0])) Ui.Notice($"{matches[0].Name} needs a login that is not saved yet (Settings > Log in to a site).");
+                    return matches[0];
+                }
+                Console.WriteLine(matches.Count == 0 ? "No site matches that." : $"That matches {string.Join(", ", matches.Select(p => p.Name))}; type more of the name.");
+            }
+        }
+
+        private static string PickRating(DanbooruProvider provider)
+        {
+            var options = provider.UsesGeneralSensitiveRatings
+                ? new[] { "any", "general", "sensitive", "questionable", "explicit" }
+                : new[] { "any", "safe", "questionable", "explicit" };
+            var index = Choose("Rating", options);
+            return index == 0 ? null : options[index];
+        }
+
+        private static readonly string[] HowMuch = { "first page", "every page", "every page and keep it updated (track)" };
+
+        private static List<string> DownloadArgs(DanbooruProvider provider, string tags, string rating, int howMuch)
+        {
+            var args = new List<string> { "download", "--provider", provider.Name };
+            if (!string.IsNullOrWhiteSpace(tags)) args.AddRange(new[] { "--tags", tags });
+            if (rating != null) args.AddRange(new[] { "--rating", rating });
+            if (howMuch == 1) args.Add("--all-pages");
+            if (howMuch == 2) args.Add("--track");
+            return args;
+        }
+
+        /// <summary>
+        /// The remembered output folder, plus the less common options only when asked for,
+        /// so a plain download stays a few Enter presses.
+        /// </summary>
+        private static void AddOptions(List<string> args, bool outputIsBaseFolder = true)
+        {
+            var output = _settings.LastOutput;
+            if (Confirm("Change other options (folder, blacklist, filenames, delay)", false))
+            {
+                if (outputIsBaseFolder)
+                {
+                    output = Prompt("Download folder", output ?? AppPaths.DefaultOutput);
+                    _settings.LastOutput = Path.GetFullPath(output) == Path.GetFullPath(AppPaths.DefaultOutput) ? null : output;
+                    _settings.Save();
+                }
+                var blacklist = Prompt("Skip posts with any of these tags (comma-separated)");
+                if (blacklist.Length > 0) args.AddRange(new[] { "--blacklist", blacklist });
+                var format = Prompt("Filename format (Enter for the default; e.g. %artist% - %id%)");
+                if (format.Length > 0) args.AddRange(new[] { "--filename-format", format });
+                var limit = Prompt("Posts per page (Enter for the site's default)");
+                if (limit.Length > 0) args.AddRange(new[] { "--limit", limit });
+                var delay = Prompt("Wait between requests in ms", "0");
+                if (delay != "0") args.AddRange(new[] { "--delay", delay });
+                if (!Confirm("Write a browsable index.html", true)) args.Add("--no-html-index");
+            }
+            if (outputIsBaseFolder && output != null) args.AddRange(new[] { "--output", output });
         }
 
         // ---- actions ----
 
-        private static async Task DoSearch()
-        {
-            Console.WriteLine("\n== Search ==");
-            var providersPath = GetProvidersPath();
-            var providers = LoadProvidersOrThrow(providersPath);
-            var provider = PickProvider(providers);
-            var tags = Prompt("Tags (space-separated, blank = browse latest)");
-            var rating = RatingPrompt();
-            var limit = Prompt("Limit", provider.DefaultLimit.ToString());
-            var json = Confirm("Show as JSON", false);
-
-            var flags = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-            {
-                ["provider"] = provider.Name,
-                ["providers"] = providersPath,
-            };
-            SetIfNotEmpty(flags, "tags", tags);
-            SetIfNotEmpty(flags, "rating", rating);
-            SetIfNotEmpty(flags, "limit", limit);
-            if (json) flags["json"] = "true";
-
-            await Program.RunSearch(flags);
-        }
-
         private static async Task DoDownload()
         {
-            Console.WriteLine("\n== Download ==");
-            var providersPath = GetProvidersPath();
-            var providers = LoadProvidersOrThrow(providersPath);
-            var provider = PickProvider(providers);
-            var tags = Prompt("Tags (space-separated, blank = browse latest)");
-            var rating = RatingPrompt();
-            var limit = Prompt("Limit", provider.DefaultLimit.ToString());
-            var output = Prompt("Output folder", "downloads");
-            var allPages = Confirm("Download the whole gallery (every page)", false);
-            var htmlIndex = Confirm("Generate a browsable index.html", true);
+            Ui.Heading("\n== Download ==");
+            var provider = PickProvider(LoadProviders());
+            var tags = Prompt("Tags (space-separated; Enter for the newest posts)");
+            var howMuch = Choose("How much", HowMuch);
+            var args = DownloadArgs(provider, tags, PickRating(provider), howMuch);
+            AddOptions(args);
+            await Run(args);
+        }
 
-            var flags = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-            {
-                ["provider"] = provider.Name,
-                ["providers"] = providersPath,
-                ["output"] = output,
-            };
-            SetIfNotEmpty(flags, "tags", tags);
-            SetIfNotEmpty(flags, "rating", rating);
-            SetIfNotEmpty(flags, "limit", limit);
-            if (allPages) flags["all-pages"] = "true";
-            if (htmlIndex) flags["html-index"] = "true";
+        private static async Task DoSearch()
+        {
+            Ui.Heading("\n== Search ==");
+            var provider = PickProvider(LoadProviders());
+            var tags = Prompt("Tags (space-separated; Enter for the newest posts)");
+            var rating = PickRating(provider);
 
-            await Program.RunDownload(flags);
+            var args = new List<string> { "search", "--provider", provider.Name };
+            if (!string.IsNullOrWhiteSpace(tags)) args.AddRange(new[] { "--tags", tags });
+            if (rating != null) args.AddRange(new[] { "--rating", rating });
+            await Run(args, confirm: false);
+
+            Console.WriteLine();
+            var next = Choose("Download", new[] { "no" }.Concat(HowMuch).ToArray());
+            if (next == 0) return;
+            var download = DownloadArgs(provider, tags, rating, next - 1);
+            AddOptions(download);
+            await Run(download);
         }
 
         private static async Task DoBatch()
         {
-            Console.WriteLine("\n== Batch download ==");
-            var jobsFile = PromptRequired("Jobs file (one tag query per line)");
-            var providersPath = GetProvidersPath();
-            var providers = LoadProvidersOrThrow(providersPath);
-            Console.WriteLine("Pick providers to run each job against (comma-separated numbers or names):");
-            for (int i = 0; i < providers.Count; i++) Console.WriteLine($"  {i + 1,3}) {providers[i].Name}");
-            var providerSelection = PromptRequired("Providers");
-            var providerNames = ResolveProviderNames(providers, providerSelection);
-            var output = Prompt("Output folder", "downloads");
-            var allPages = Confirm("Download whole galleries (every page)", false);
-            var htmlIndex = Confirm("Generate a browsable index.html", true);
-
-            var flags = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            Ui.Heading("\n== Batch download ==");
+            string jobsFile;
+            while (!File.Exists(jobsFile = PromptRequired("File with one tag search per line")))
             {
-                ["jobs"] = jobsFile,
-                ["provider-names"] = string.Join(",", providerNames),
-                ["providers"] = providersPath,
-                ["output"] = output,
-            };
-            if (allPages) flags["all-pages"] = "true";
-            if (htmlIndex) flags["html-index"] = "true";
+                Console.WriteLine("File not found.");
+            }
 
-            await Program.RunBatch(flags);
+            var providers = LoadProviders();
+            for (int i = 0; i < providers.Count; i++) Console.WriteLine($"  {i + 1,2}) {providers[i].Name}");
+            var selection = PromptRequired("Sites to run each line on (numbers or names, comma-separated)", Program.FindProvider(providers, _settings.LastProvider)?.Name ?? "");
+            var names = selection.Split(',').Select(s => s.Trim()).Where(s => s.Length > 0)
+                .Select(s => int.TryParse(s, out var n) && n >= 1 && n <= providers.Count ? providers[n - 1].Name : s);
+
+            var args = new List<string> { "batch", "--jobs", jobsFile, "--provider-names", string.Join(",", names) };
+            var howMuch = Choose("How much per line", HowMuch);
+            if (howMuch == 1) args.Add("--all-pages");
+            if (howMuch == 2) args.Add("--track");
+            AddOptions(args);
+            await Run(args);
         }
 
-        private static List<string> ResolveProviderNames(List<DanbooruProvider> providers, string selection)
+        private static TrackedArtist PickTracked()
         {
-            var result = new List<string>();
-            foreach (var token in selection.Split(','))
+            var artists = new SqliteProvider(AppPaths.Db).ListTrackedArtists();
+            if (artists.Count == 0)
             {
-                var t = token.Trim();
-                if (t.Length == 0) continue;
-                if (int.TryParse(t, out var index) && index >= 1 && index <= providers.Count)
-                {
-                    result.Add(providers[index - 1].Name);
-                }
-                else
-                {
-                    var p = Program.FindProvider(providers, t);
-                    result.Add(p?.Name ?? t);
-                }
+                Console.WriteLine("No tracked artists yet.");
+                return null;
             }
-            return result;
+            for (int i = 0; i < artists.Count; i++) Console.WriteLine($"  {i + 1,2}) {artists[i].Tag}  ({artists[i].ProviderName})");
+            while (true)
+            {
+                var input = Prompt("Artist number (0 to go back)", "0");
+                if (input == "0") return null;
+                if (int.TryParse(input, out var n) && n >= 1 && n <= artists.Count) return artists[n - 1];
+                Console.WriteLine("Not a valid number.");
+            }
         }
 
         private static async Task DoArtistMenu()
         {
-            Console.WriteLine("\n== Tracked artists ==");
-            Console.WriteLine("1) Add (track + download the whole gallery)");
-            Console.WriteLine("2) Add many (from a file)");
-            Console.WriteLine("3) List tracked");
-            Console.WriteLine("4) Remove (stop tracking)");
-            Console.WriteLine("5) Refresh one");
-            Console.WriteLine("6) Refresh all");
+            Ui.Heading("\n== Tracked artists ==");
+            Console.WriteLine("1) Add an artist (download everything, then keep it updated)");
+            Console.WriteLine("2) Add many from a file");
+            Console.WriteLine("3) List");
+            Console.WriteLine("4) Refresh one");
+            Console.WriteLine("5) Remove");
             Console.WriteLine("0) Back");
-            var choice = Prompt("Choose an option", "0");
-            if (choice == "0") return;
 
-            var flags = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["db"] = GetDbPath() };
-
-            switch (choice)
+            switch (Prompt("Choose", "0"))
             {
                 case "1":
                     {
-                        var providersPath = GetProvidersPath();
-                        var providers = LoadProvidersOrThrow(providersPath);
-                        var provider = PickProvider(providers);
+                        var provider = PickProvider(LoadProviders());
                         var tag = PromptRequired("Artist tag");
-                        var output = PromptRequired("Output folder for this artist");
-                        flags["provider"] = provider.Name;
-                        flags["providers"] = providersPath;
-                        flags["tags"] = tag;
-                        flags["output"] = output;
-                        await Program.RunArtist("add", flags);
+                        var args = new List<string> { "artist", "add", provider.Name, tag };
+                        var rating = PickRating(provider);
+                        if (rating != null) args.AddRange(new[] { "--rating", rating });
+                        if (_settings.LastOutput != null) args.AddRange(new[] { "--output", Path.Combine(_settings.LastOutput, Program.FolderForSearch(tag)) });
+                        AddOptions(args, outputIsBaseFolder: false);
+                        await Run(args);
                         break;
                     }
                 case "2":
                     {
-                        var file = PromptRequired("File (lines of provider,tag,output_dir[,rating])");
-                        flags["file"] = file;
-                        flags["providers"] = GetProvidersPath();
-                        await Program.RunArtist("add-many", flags);
+                        var file = PromptRequired("File with lines of provider,artist,output_dir[,rating]");
+                        await Run(new List<string> { "artist", "add-many", "--file", file });
                         break;
                     }
                 case "3":
-                    await Program.RunArtist("list", flags);
+                    await Run(new List<string> { "artist", "list" }, confirm: false);
                     break;
                 case "4":
                     {
-                        var providersPath = GetProvidersPath();
-                        var providers = LoadProvidersOrThrow(providersPath);
-                        var provider = PickProvider(providers);
-                        var tag = PromptRequired("Artist tag");
-                        flags["provider"] = provider.Name;
-                        flags["tags"] = tag;
-                        await Program.RunArtist("remove", flags);
+                        var artist = PickTracked();
+                        if (artist != null) await Run(new List<string> { "artist", "refresh", artist.ProviderName, artist.Tag }, confirm: false);
                         break;
                     }
                 case "5":
                     {
-                        var providersPath = GetProvidersPath();
-                        var providers = LoadProvidersOrThrow(providersPath);
-                        var provider = PickProvider(providers);
-                        var tag = PromptRequired("Artist tag");
-                        flags["provider"] = provider.Name;
-                        flags["providers"] = providersPath;
-                        flags["tags"] = tag;
-                        await Program.RunArtist("refresh", flags);
+                        var artist = PickTracked();
+                        if (artist != null) await Run(new List<string> { "artist", "remove", artist.ProviderName, artist.Tag });
+                        break;
+                    }
+                case "0":
+                    break;
+                default:
+                    Console.WriteLine("Not a valid option.");
+                    break;
+            }
+        }
+
+        private static async Task DoSettingsMenu()
+        {
+            Ui.Heading("\n== Settings ==");
+            Ui.Dim($"Data folder: {AppPaths.DataHome}");
+            Ui.Dim($"Downloads:   {Path.GetFullPath(_settings.LastOutput ?? AppPaths.DefaultOutput)}");
+            Console.WriteLine("1) List sites");
+            Console.WriteLine("2) Site details");
+            Console.WriteLine("3) Check which sites are reachable");
+            Console.WriteLine("4) Log in to a site (API key or cookie)");
+            Console.WriteLine("5) Automatic refresh of tracked artists");
+            Console.WriteLine("6) Download tag names for %artist%-style filenames");
+            Console.WriteLine("0) Back");
+
+            switch (Prompt("Choose", "0"))
+            {
+                case "1":
+                    await Run(new List<string> { "providers", "list" }, confirm: false);
+                    break;
+                case "2":
+                    await Run(new List<string> { "providers", "show", PickProvider(LoadProviders()).Name }, confirm: false);
+                    break;
+                case "3":
+                    await Run(new List<string> { "providers", "check" }, confirm: false);
+                    break;
+                case "4":
+                    await Run(new List<string> { "login", PickProvider(LoadProviders()).Name }, confirm: false);
+                    break;
+                case "5":
+                    {
+                        await Run(new List<string> { "artist", "schedule", "status" }, confirm: false);
+                        var action = Choose("Change", new[] { "nothing", "install or change the interval", "remove" });
+                        if (action == 1) await Run(new List<string> { "artist", "schedule", "install", "--interval-hours", Prompt("Refresh every how many hours", "24") });
+                        if (action == 2) await Run(new List<string> { "artist", "schedule", "uninstall" });
                         break;
                     }
                 case "6":
-                    flags["all"] = "true";
-                    await Program.RunArtist("refresh", flags);
-                    break;
-                default:
-                    Console.WriteLine("Not a valid option.");
-                    break;
-            }
-        }
-
-        private static async Task DoProvidersMenu()
-        {
-            Console.WriteLine("\n== Providers ==");
-            Console.WriteLine("1) List");
-            Console.WriteLine("2) Show details");
-            Console.WriteLine("3) Check reachability (Cloudflare, etc.)");
-            Console.WriteLine("0) Back");
-            var choice = Prompt("Choose an option", "0");
-            if (choice == "0") return;
-
-            var providersPath = GetProvidersPath();
-
-            switch (choice)
-            {
-                case "1":
-                    await Program.RunProviders(new[] { "list", "--providers", providersPath });
-                    break;
-                case "2":
-                    {
-                        var providers = LoadProvidersOrThrow(providersPath);
-                        var provider = PickProvider(providers);
-                        await Program.RunProviders(new[] { "show", provider.Name, "--providers", providersPath });
-                        break;
-                    }
-                case "3":
-                    await Program.RunProviders(new[] { "check", "--providers", providersPath });
-                    break;
-                default:
-                    Console.WriteLine("Not a valid option.");
-                    break;
-            }
-        }
-
-        private static async Task DoCookie()
-        {
-            Console.WriteLine("\n== Set cookie ==");
-            var providersPath = GetProvidersPath();
-            var providers = LoadProvidersOrThrow(providersPath);
-            var provider = PickProvider(providers);
-            var value = PromptRequired("Cookie value");
-            Program.RunCookie(new[] { "set", provider.Name, value, "--providers", providersPath });
-        }
-
-        private static void DoApiKey()
-        {
-            Console.WriteLine("\n== Set API key ==");
-            var providersPath = GetProvidersPath();
-            var providers = LoadProvidersOrThrow(providersPath);
-            var provider = PickProvider(providers);
-            var apiKey = PromptRequired("API key");
-            var user = PromptRequired(provider.BoardType == BoardType.Gelbooru ? "User ID (numeric, from your account's API page)" : "Username");
-            Program.RunApiKey(new[] { "set", provider.Name, apiKey, user, "--providers", providersPath });
-        }
-
-        private static async Task DoTagsDownload()
-        {
-            Console.WriteLine("\n== Download tags.xml ==");
-            var providersPath = GetProvidersPath();
-            var providers = LoadProvidersOrThrow(providersPath);
-            var provider = PickProvider(providers);
-            var output = Prompt("Save to", "tags.xml");
-
-            var flags = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-            {
-                ["provider"] = provider.Name,
-                ["providers"] = providersPath,
-                ["output"] = output,
-            };
-            await Program.RunTagsDownload(flags);
-        }
-
-        private static async Task DoScheduleMenu()
-        {
-            Console.WriteLine("\n== Scheduled auto-refresh ==");
-            Console.WriteLine("1) Install (runs 'refresh all tracked artists' automatically)");
-            Console.WriteLine("2) Uninstall");
-            Console.WriteLine("3) Status");
-            Console.WriteLine("0) Back");
-            var choice = Prompt("Choose an option", "0");
-
-            switch (choice)
-            {
-                case "1":
-                    {
-                        var hours = Prompt("Refresh every how many hours", "24");
-                        var dbPath = GetDbPath();
-                        var providersPath = GetProvidersPath();
-                        var flags = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-                        {
-                            ["interval-hours"] = hours,
-                            ["db"] = dbPath,
-                            ["providers"] = providersPath,
-                        };
-                        Program.RunArtistSchedule("install", flags);
-                        break;
-                    }
-                case "2":
-                    Program.RunArtistSchedule("uninstall", new Dictionary<string, string>());
-                    break;
-                case "3":
-                    Program.RunArtistSchedule("status", new Dictionary<string, string>());
+                    await Run(new List<string> { "tags", "download", "--provider", PickProvider(LoadProviders()).Name });
                     break;
                 case "0":
                     break;

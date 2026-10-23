@@ -14,5 +14,8 @@ namespace DanbooruDownloader.Cli.Utils
         {
             return boardType == BoardType.Gelbooru ? 0 : 1;
         }
+
+        // Users always count pages from 1; convert to the board's own numbering.
+        public static int ToApiPage(BoardType boardType, int userPage) => userPage - 1 + FirstPage(boardType);
     }
 }

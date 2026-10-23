@@ -21,11 +21,6 @@ namespace DanbooruDownloader.Cli.Scheduling
 
         public static (bool ok, string message) Install(int intervalHours, string dbPath, string providersPath, string workingDirectory)
         {
-            if (!OperatingSystem.IsMacOS())
-            {
-                return (false, "Scheduling uses macOS launchd. On Windows, create a Task Scheduler task that runs: run.bat artist refresh --all");
-            }
-
             var (programArgs, error) = ResolveProgramArguments();
             if (error != null) return (false, error);
 
@@ -83,7 +78,7 @@ namespace DanbooruDownloader.Cli.Scheduling
         /// for a framework-dependent build (the common case, `dotnet run`/`dotnet build`
         /// output), or the executable path directly for a self-contained publish.
         /// </summary>
-        private static (string[] args, string error) ResolveProgramArguments()
+        internal static (string[] args, string error) ResolveProgramArguments()
         {
             var processPath = Environment.ProcessPath;
             if (string.IsNullOrWhiteSpace(processPath))

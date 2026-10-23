@@ -18,16 +18,7 @@ namespace DanbooruDownloader.Cli.Config
     {
         public const string FileName = ".env";
 
-        // Same lookup as the provider list: working directory first, then next to the binary.
-        public static string DefaultPath
-        {
-            get
-            {
-                if (File.Exists(FileName)) return FileName;
-                var shipped = Path.Combine(AppContext.BaseDirectory, FileName);
-                return File.Exists(shipped) ? shipped : null;
-            }
-        }
+        public static string DefaultPath => File.Exists(AppPaths.Env) ? AppPaths.Env : null;
 
         public static Dictionary<string, string> Parse(IEnumerable<string> lines)
         {
@@ -48,6 +39,23 @@ namespace DanbooruDownloader.Cli.Config
 
         public static string KeyFor(DanbooruProvider provider) =>
             Regex.Replace(provider.Name.ToUpperInvariant(), "[^A-Z0-9]+", "_").Trim('_');
+
+        /// <summary>
+        /// Sets (or, with a null value, removes) these keys in the .env file, keeping its other
+        /// lines. Creates the file in the data folder when there is none yet.
+        /// </summary>
+        public static string Write(params (string key, string value)[] entries)
+        {
+            var path = AppPaths.Env;
+            var lines = File.Exists(path) ? File.ReadAllLines(path).ToList() : new List<string>();
+            foreach (var (key, value) in entries)
+            {
+                lines.RemoveAll(l => Regex.IsMatch(l, $@"^\s*(export\s+)?{Regex.Escape(key)}\s*=", RegexOptions.IgnoreCase));
+                if (value != null) lines.Add($"{key}={value}");
+            }
+            File.WriteAllLines(path, lines);
+            return path;
+        }
 
         public static void Apply(List<DanbooruProvider> providers, string envPath)
         {

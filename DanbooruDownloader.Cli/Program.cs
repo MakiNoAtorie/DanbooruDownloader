@@ -10,6 +10,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace DanbooruDownloader.Cli
@@ -18,190 +19,113 @@ namespace DanbooruDownloader.Cli
     {
         public static readonly SimpleLogger Logger = new SimpleLogger();
 
+        private static CancellationTokenSource _cts = new CancellationTokenSource();
+        private static bool _commandRunning;
+
+        /// <summary>Cancelled by the first Ctrl+C during a command; every request and delay observes it.</summary>
+        internal static CancellationToken Token => _cts.Token;
+
         public static async Task<int> Main(string[] args)
         {
-            // No args (e.g. a double-clicked launcher) drops into the numbered interactive
-            // menu instead of just dumping usage and exiting - --help still gives the full
-            // flag reference for scripting.
+            Console.CancelKeyPress += OnCancelKey;
+
+            // No args (e.g. a double-clicked launcher) drops into the numbered interactive menu.
             if (args.Length == 0)
             {
                 return await Interactive.InteractiveMenu.RunAsync();
             }
+            return await RunCommand(args);
+        }
 
-            if (args[0] is "-h" or "--help")
+        // First Ctrl+C stops the command cleanly (partial file removed, summary printed);
+        // a second one, or one outside a command, ends the process as usual.
+        private static void OnCancelKey(object sender, ConsoleCancelEventArgs e)
+        {
+            if (!_commandRunning || _cts.IsCancellationRequested) return;
+            e.Cancel = true;
+            _cts.Cancel();
+            Ui.Warn("Stopping... (press Ctrl+C again to quit at once)");
+        }
+
+        /// <summary>Runs one command line. The interactive menu calls this too, so both share parsing and checks.</summary>
+        internal static async Task<int> RunCommand(string[] args)
+        {
+            _commandRunning = true;
+            try
             {
-                PrintUsage();
+                return await Dispatch(args);
+            }
+            catch (UsageException ex)
+            {
+                Ui.Error(ex.Message);
+                var help = HelpText.Commands.ContainsKey(args[0]) ? $"danboo {args[0]} --help" : "danboo --help";
+                Ui.DimErr($"See: {help}");
+                return 2;
+            }
+            catch (OperationCanceledException) when (Token.IsCancellationRequested)
+            {
+                Ui.Warn("Stopped.");
+                return 130;
+            }
+            finally
+            {
+                _commandRunning = false;
+                if (_cts.IsCancellationRequested) _cts = new CancellationTokenSource();
+            }
+        }
+
+        private static readonly string[] CommandNames = { "download", "search", "batch", "artist", "login", "cookie", "apikey", "providers", "tags" };
+
+        private static async Task<int> Dispatch(string[] args)
+        {
+            var command = args[0];
+            var rest = args[1..];
+
+            if (command is "-h" or "--help" or "help")
+            {
+                Ui.Line(rest.Length > 0 && HelpText.Commands.TryGetValue(rest[0], out var topic) ? topic() : HelpText.General);
+                return 0;
+            }
+            if (command is "--version" or "-V")
+            {
+                Ui.Line($"danboo {typeof(Program).Assembly.GetName().Version?.ToString(3)}");
+                return 0;
+            }
+            if ((rest.Contains("--help") || rest.Contains("-h")) && HelpText.Commands.TryGetValue(command, out var help))
+            {
+                Ui.Line(help());
                 return 0;
             }
 
-            // "providers" and "cookie" take a positional sub-action (list/show/set) rather
-            // than --flags, so they're handled separately from the flag-based commands.
-            if (args[0] == "providers") return await RunProviders(args.Skip(1).ToArray());
-            if (args[0] == "cookie") return RunCookie(args.Skip(1).ToArray());
-            if (args[0] == "apikey") return RunApiKey(args.Skip(1).ToArray());
-
-            if (args[0] == "tags")
+            switch (command)
             {
-                if (args.Length < 2 || args[1] != "download")
-                {
-                    Console.Error.WriteLine("Usage: danboo tags download --provider <name> [--output tags.xml] [options]");
-                    return 1;
-                }
-                var tagsFlags = ParseFlags(args.Skip(2).ToArray());
-                Logger.Verbose = tagsFlags.ContainsKey("verbose") || tagsFlags.ContainsKey("v");
-                return await RunTagsDownload(tagsFlags);
-            }
-
-            // "artist schedule" has its own nested sub-action (install/uninstall/status).
-            if (args[0] == "artist" && args.Length >= 2 && args[1] == "schedule")
-            {
-                if (args.Length < 3)
-                {
-                    Console.Error.WriteLine("Usage: danboo artist schedule install|uninstall|status [options]");
-                    return 1;
-                }
-                var scheduleFlags = ParseFlags(args.Skip(3).ToArray());
-                return RunArtistSchedule(args[2], scheduleFlags);
-            }
-
-            // "artist" also has a positional sub-action (add/list/remove/refresh), but the
-            // rest of its args are still --flags.
-            if (args[0] == "artist")
-            {
-                if (args.Length < 2)
-                {
-                    Console.Error.WriteLine("Usage: danboo artist add|list|remove|refresh [options]");
-                    return 1;
-                }
-                var artistFlags = ParseFlags(args.Skip(2).ToArray());
-                Logger.Verbose = artistFlags.ContainsKey("verbose") || artistFlags.ContainsKey("v");
-                return await RunArtist(args[1], artistFlags);
-            }
-
-            var flags = ParseFlags(args.Skip(1).ToArray());
-            Logger.Verbose = flags.ContainsKey("verbose") || flags.ContainsKey("v");
-
-            switch (args[0])
-            {
-                case "search":
-                    return await RunSearch(flags);
-
-                case "download":
-                    return await RunDownload(flags);
-
-                case "batch":
-                    return await RunBatch(flags);
-
+                case "search": return await RunSearch(Parse(rest, SearchSpec));
+                case "download": return await RunDownload(Parse(rest, "provider= tags= " + DownloadSpec));
+                case "batch": return await RunBatch(Parse(rest, "jobs= provider-names= " + DownloadSpec));
+                case "providers": return await RunProviders(rest);
+                case "login": return RunLogin(rest);
+                case "cookie": return RunCookie(rest);
+                case "apikey": return RunApiKey(rest);
+                case "artist": return await RunArtist(rest);
+                case "tags":
+                    if (rest.Length == 0 || rest[0] != "download") throw new UsageException("Usage: danboo tags download --provider <name> [--output <file>]");
+                    return await RunTagsDownload(Parse(rest[1..], "provider= output= limit= max-pages= delay= providers="));
                 default:
-                    Console.Error.WriteLine($"Unknown command: {args[0]}");
-                    PrintUsage();
-                    return 1;
+                    var guess = CommandNames.OrderBy(c => Flags.Distance(c, command)).First();
+                    throw new UsageException($"Unknown command '{command}'.{(Flags.Distance(guess, command) <= 2 ? $" Did you mean '{guess}'?" : "")}");
             }
         }
 
-        private static void PrintUsage()
+        private const string FilterSpec = "rating= not-rating limit= page= blacklist= blacklist-regex= retry= retry-delay= providers=";
+        private const string SearchSpec = "provider= tags= json " + FilterSpec;
+        // --html-index is the old opt-in; the index is now written by default.
+        private const string DownloadSpec = FilterSpec + " output= filename-format= db= force extension-filter= exclude-extension dedup-by-md5 html-index no-html-index all-pages max-pages= delay= track";
+
+        private static Dictionary<string, string> Parse(string[] args, string spec, List<string> positionals = null)
         {
-            Console.WriteLine("""
-                danboo                  Interactive numbered menu (no flags needed)
-
-                danboo search   --provider <name> --tags "<tags>" [options]
-                danboo download --provider <name> --tags "<tags>" --output <dir> [options]
-                danboo batch    --jobs <file> --provider-names <p1,p2,...> --output <dir> [options]
-                danboo providers list|show <name>|check [--providers <path>]
-                danboo cookie set <provider> <value> [--providers <path>]
-                danboo apikey set <provider> <api-key> <username-or-user-id> [--providers <path>]
-                danboo tags download --provider <name> [--output tags.xml] [options]
-
-                Credentials can also live in a .env file (working directory, or next to the binary),
-                kept out of DanbooruProviderList.xml. NAME is the provider name upper-cased, other
-                characters as "_" (gelbooru.com -> GELBOORU_COM):
-                  NAME_API_KEY=...  NAME_USER=...   API-key login (USER: Danbooru username / Gelbooru user ID)
-                  NAME_COOKIE=...                   cookie login
-                Environment variables of the same names take precedence over the file.
-
-                Common options:
-                  --provider <name>     Provider name from DanbooruProviderList.xml (required for search/download)
-                  --tags <tags>         Space-separated tag query
-                  --rating <r>          safe | questionable | explicit, or sensitive on Danbooru/Gelbooru
-                                        (where "safe" is sent as "general")
-                  --not-rating          Negate --rating
-                  --limit <n>           Max results per job/page
-                  --page <n>            Page number
-                  --providers <path>    Path to DanbooruProviderList.xml (default: ./DanbooruProviderList.xml)
-                  --blacklist <tags>    Comma-separated tag names to skip (post.Hidden)
-                  --blacklist-regex <r> Regex alternative to --blacklist
-                  --delay <ms>          Politeness delay between requests (pages and file downloads); default 0
-                  -v, --verbose         Verbose logging
-
-                search-only:
-                  --json                Print raw post list as JSON
-
-                download/batch/artist:
-                  --output <dir>        Base output folder (default: ./downloads)
-                  --filename-format <f> %token% template (default: %searchtag%/%rating% - %id% - %tags%)
-                  --db <path>           Dedup SQLite DB path (default: ./downloaded.db)
-                  --force                Re-download even if already recorded/on disk
-                  --extension-filter <r> Regex against the file extension
-                  --exclude-extension    Invert --extension-filter (exclude matches instead of requiring them)
-                  --retry <n>            Retries per request on failure (default 3)
-                  --retry-delay <ms>     Delay between retries (default 3000)
-                  --dedup-by-md5         Also skip a post if its exact image was already downloaded under
-                                         a different provider/post-id (common for crossposted art)
-                  --html-index           Write an index.html gallery into --output after downloading
-                  --all-pages            (download/batch only) walk every page instead of just one -
-                                         same pagination as "artist add", but without tracking it
-                  --max-pages <n>        Safety cap on pages walked (default 1000)
-
-                batch-only:
-                  --jobs <file>          One tag query per line (blank lines and lines starting with # are skipped)
-                  --provider-names <p>   Comma-separated provider names; each job line runs against each provider
-
-                danboo artist add      --provider <name> --tags "<artist>" --output <dir> [options]
-                danboo artist add-many --file <path> [options]
-                danboo artist list     [--db <path>]
-                danboo artist remove   --provider <name> --tags "<artist>" [--db <path>]
-                danboo artist refresh  [--provider <name> --tags "<artist>" | --all] [--db <path>]
-
-                  "artist add" downloads the artist's entire gallery (paging through results
-                  until an empty page) into --output, and remembers the provider/tag/output/
-                  filename-format/rating so "artist refresh" can be run later with no flags -
-                  it re-walks pages from the newest post until it hits a page with nothing
-                  new to download, so only new work gets fetched. Generates an index.html
-                  in --output by default (--no-html-index to skip).
-
-                  "artist add-many" reads --file, one "provider,tag,output_dir[,rating]" line
-                  per artist, and runs "artist add" for each.
-
-                danboo artist schedule install [--interval-hours <n>] [--db <path>] [--providers <path>]
-                danboo artist schedule uninstall
-                danboo artist schedule status
-
-                  Installs a macOS launchd agent (~/Library/LaunchAgents) that runs
-                  "artist refresh --all" every --interval-hours (default 24), so tracked
-                  artists actually stay up to date without you remembering to run refresh.
-
-                danboo tags download downloads a provider's tag list into tags.xml so
-                %artist%/%character%/%copyright%/%circle% filename tokens resolve to real
-                names instead of falling back to "Unknown" - fetches by tag type where the
-                board supports it (most do), since a plain count-ordered dump buries rare
-                tags like individual artist names under generic ones like "long_hair".
-                """);
-        }
-
-        private static Dictionary<string, string> ParseFlags(string[] args)
-        {
-            static bool IsFlag(string s) => s.StartsWith("--") || (s.Length == 2 && s[0] == '-');
-
-            var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            for (int i = 0; i < args.Length; i++)
-            {
-                if (!IsFlag(args[i])) continue;
-
-                var key = args[i].TrimStart('-');
-                var hasValue = i + 1 < args.Length && !IsFlag(args[i + 1]);
-                result[key] = hasValue ? args[++i] : "true";
-            }
-            return result;
+            var flags = Flags.Parse(args, spec, positionals);
+            Logger.Verbose = flags.ContainsKey("verbose") || flags.ContainsKey("v");
+            return flags;
         }
 
         // Prefer a provider list in the working directory; fall back to the one shipped next
@@ -219,9 +143,13 @@ namespace DanbooruDownloader.Cli
 
         private static string GetProvidersPath(Dictionary<string, string> flags) => flags.GetValueOrDefault("providers") ?? DefaultProvidersPath;
 
-        private static int? TryInt(string value)
+        private static string GetDbPath(Dictionary<string, string> flags) => flags.GetValueOrDefault("db") ?? AppPaths.Db;
+
+        private static SqliteProvider OpenDb(Dictionary<string, string> flags)
         {
-            return int.TryParse(value, out var result) ? result : null;
+            var db = new SqliteProvider(GetDbPath(flags));
+            db.Create();
+            return db;
         }
 
         // ---- shared: providers, search params, fetching, downloading ----
@@ -244,21 +172,86 @@ namespace DanbooruDownloader.Cli
             }
         }
 
-        internal static DanbooruProvider FindProvider(List<DanbooruProvider> providers, string name)
+        private static List<DanbooruProvider> LoadProviders(Dictionary<string, string> flags)
         {
-            return providers.FirstOrDefault(p => string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase));
+            var providers = LoadProviders(GetProvidersPath(flags), out var error);
+            if (error != null) throw new UsageException(error);
+            return providers;
         }
 
+        /// <summary>
+        /// The exact name, else the providers whose name (letters and digits only) starts
+        /// with, or else contains, what was typed: "e621" finds "e621 (Furry)".
+        /// </summary>
+        internal static List<DanbooruProvider> MatchProviders(List<DanbooruProvider> providers, string name)
+        {
+            if (string.IsNullOrWhiteSpace(name)) return new List<DanbooruProvider>();
+            var exact = providers.FirstOrDefault(p => string.Equals(p.Name, name.Trim(), StringComparison.OrdinalIgnoreCase));
+            if (exact != null) return new List<DanbooruProvider> { exact };
+
+            static string Key(string s) => new string(s.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
+            var key = Key(name);
+            if (key.Length == 0) return new List<DanbooruProvider>();
+            var prefix = providers.Where(p => Key(p.Name).StartsWith(key)).ToList();
+            return prefix.Count > 0 ? prefix : providers.Where(p => Key(p.Name).Contains(key)).ToList();
+        }
+
+        internal static DanbooruProvider FindProvider(List<DanbooruProvider> providers, string name)
+        {
+            var matches = MatchProviders(providers, name);
+            return matches.Count == 1 ? matches[0] : null;
+        }
+
+        private static DanbooruProvider RequireProvider(List<DanbooruProvider> providers, string name)
+        {
+            if (string.IsNullOrWhiteSpace(name)) throw new UsageException("--provider is required. \"danboo providers list\" shows the sites.");
+            var matches = MatchProviders(providers, name);
+            if (matches.Count == 1) return matches[0];
+            throw new UsageException(matches.Count == 0
+                ? $"No provider matches '{name}'. Available: {string.Join(", ", providers.Select(p => p.Name))}"
+                : $"'{name}' matches several providers: {string.Join(", ", matches.Select(p => p.Name))}. Type more of the name.");
+        }
+
+        internal static bool LoginMissing(DanbooruProvider provider) => provider.LoginType switch
+        {
+            LoginType.ApiKey => string.IsNullOrEmpty(provider.ApiKey),
+            LoginType.Cookie or LoginType.CookieAlwaysAsk => string.IsNullOrEmpty(provider.UserName),
+            _ => false,
+        };
+
+        private static void WarnIfLoginMissing(DanbooruProvider provider)
+        {
+            if (!LoginMissing(provider)) return;
+            var kind = provider.LoginType == LoginType.ApiKey ? "an API key" : "a cookie";
+            Logger.Warn($"{provider.Name} needs {kind} and none is saved, so requests may fail. Save one with: danboo login \"{provider.Name}\"");
+        }
+
+        private static Regex ParseRegex(Dictionary<string, string> flags, string key)
+        {
+            var pattern = flags.GetValueOrDefault(key);
+            if (string.IsNullOrWhiteSpace(pattern)) return null;
+            try
+            {
+                return new Regex(pattern, RegexOptions.IgnoreCase);
+            }
+            catch (ArgumentException ex)
+            {
+                throw new UsageException($"--{key} is not a valid regular expression: {ex.Message}");
+            }
+        }
+
+        /// <param name="flags">--page here counts from 1 on every board.</param>
         private static DanbooruSearchParam BuildSearchParam(DanbooruProvider provider, string tag, Dictionary<string, string> flags)
         {
+            var userPage = Flags.Int(flags, "page", min: 1);
             var searchParam = new DanbooruSearchParam
             {
                 Provider = provider,
                 Tag = tag,
                 Rating = NormalizeRating(flags.GetValueOrDefault("rating"), provider),
                 IsNotRating = flags.ContainsKey("not-rating"),
-                Limit = ClampLimit(TryInt(flags.GetValueOrDefault("limit")) ?? provider.DefaultLimit, provider),
-                Page = TryInt(flags.GetValueOrDefault("page")),
+                Limit = ClampLimit(Flags.Int(flags, "limit", min: 1) ?? provider.DefaultLimit, provider),
+                Page = userPage is int p ? PageIndexing.ToApiPage(provider.BoardType, p) : null,
             };
             searchParam.Option = BuildOption(provider, tag, flags);
             return searchParam;
@@ -276,6 +269,21 @@ namespace DanbooruDownloader.Cli
             if (rating.StartsWith("rating:")) rating = rating["rating:".Length..];
             if (provider.UsesGeneralSensitiveRatings && rating == "safe") rating = "general";
             return "rating:" + rating;
+        }
+
+        /// <summary>The word for a post's rating letter; "s" is "sensitive" on boards that have general/sensitive.</summary>
+        internal static string RatingName(string rating, DanbooruProvider provider)
+        {
+            var r = rating?.Trim().ToLowerInvariant() ?? "";
+            if (r.StartsWith("rating:")) r = r["rating:".Length..];
+            return r switch
+            {
+                "g" => "general",
+                "s" => provider.UsesGeneralSensitiveRatings ? "sensitive" : "safe",
+                "q" => "questionable",
+                "e" => "explicit",
+                _ => r,
+            };
         }
 
         private static int ClampLimit(int limit, DanbooruProvider provider)
@@ -297,11 +305,11 @@ namespace DanbooruDownloader.Cli
                 SearchTags = tag,
             };
 
-            var blacklistRegex = flags.GetValueOrDefault("blacklist-regex");
-            if (!string.IsNullOrWhiteSpace(blacklistRegex))
+            var blacklistRegex = ParseRegex(flags, "blacklist-regex");
+            if (blacklistRegex != null)
             {
                 option.BlacklistedTagsUseRegex = true;
-                option.BlacklistedTagsRegex = new Regex(blacklistRegex, RegexOptions.IgnoreCase);
+                option.BlacklistedTagsRegex = blacklistRegex;
             }
             else
             {
@@ -335,16 +343,17 @@ namespace DanbooruDownloader.Cli
                 }
                 catch (Exception ex)
                 {
+                    Token.ThrowIfCancellationRequested();
                     lastError = ex.Message;
                 }
 
                 if (attempt < retries)
                 {
                     Logger.Warn($"Search request failed ({lastError}), retrying ({attempt + 1}/{retries})...");
-                    await Task.Delay(retryDelayMs);
+                    await Task.Delay(retryDelayMs, Token);
                 }
             }
-            return (null, $"Request failed after {retries} retr{(retries == 1 ? "y" : "ies")}: {lastError}");
+            return (null, retries == 0 ? lastError : $"Request failed after {retries} retr{(retries == 1 ? "y" : "ies")}: {lastError}");
         }
 
         private static string GetExtension(string fileUrl)
@@ -361,9 +370,10 @@ namespace DanbooruDownloader.Cli
             const int maxPath = 259;
             var over = Path.GetFullPath(baseFilename).Length + extension.Length - maxPath;
             if (over <= 0) return baseFilename;
+            var name = Path.GetFileName(baseFilename);
             // The folder alone is too long: cutting the name cannot fix it.
-            if (over >= Path.GetFileName(baseFilename).Length) return baseFilename;
-            return baseFilename[..^over].TrimEnd(' ', '.');
+            if (over >= name.Length) return baseFilename;
+            return baseFilename[..^name.Length] + Helper.CutAtTagBoundary(name[..^over]);
         }
 
         // Without a known MD5 there is nothing to compare, so assume it is the same file.
@@ -375,16 +385,19 @@ namespace DanbooruDownloader.Cli
             return string.Equals(hash, md5, StringComparison.OrdinalIgnoreCase);
         }
 
-        private static void TryGenerateHtmlIndex(string outputDir, string providerName, string tag)
+        /// <summary>Writes index.html when something new arrived or there is none yet.</summary>
+        private static void WriteIndexIfNeeded(DownloadOptions opts, string title, bool changed)
         {
+            if (!opts.HtmlIndex || !Directory.Exists(opts.OutputDir)) return;
+            if (!changed && File.Exists(Path.Combine(opts.OutputDir, "index.html"))) return;
             try
             {
-                HtmlGalleryGenerator.Generate(outputDir, $"{providerName} - {tag}");
+                HtmlGalleryGenerator.Generate(opts.OutputDir, title);
             }
             catch (Exception ex)
             {
                 // Never let index generation break an otherwise-successful download.
-                Logger.Warn($"Failed to generate index.html for {outputDir}: {ex.Message}");
+                Logger.Warn($"Failed to generate index.html for {opts.OutputDir}: {ex.Message}");
             }
         }
 
@@ -393,7 +406,7 @@ namespace DanbooruDownloader.Cli
             public string OutputDir;
             public string FilenameFormatStr;
             public bool Force;
-            public string ExtensionFilterRegex;
+            public Regex ExtensionFilter;
             public bool ExcludeExtension;
             public int Retry;
             public int RetryDelayMs;
@@ -402,25 +415,29 @@ namespace DanbooruDownloader.Cli
             public bool HtmlIndex;
         }
 
+        private const string DefaultFilenameFormat = "%searchtag%/%rating% - %id% - %tags%";
+        // For a folder that already belongs to one search (tracked artists).
+        private const string TrackedFilenameFormat = "%rating% - %id% - %tags%";
+
         private static DownloadOptions BuildDownloadOptions(Dictionary<string, string> flags)
         {
             return new DownloadOptions
             {
-                OutputDir = flags.GetValueOrDefault("output", "downloads"),
+                OutputDir = flags.GetValueOrDefault("output") ?? AppPaths.DefaultOutput,
                 // Grouped by what was searched (tag/artist), not by which site it came from -
                 // that's the more useful grouping when just browsing a downloads folder.
-                FilenameFormatStr = flags.GetValueOrDefault("filename-format", "%searchtag%/%rating% - %id% - %tags%"),
+                FilenameFormatStr = flags.GetValueOrDefault("filename-format", DefaultFilenameFormat),
                 Force = flags.ContainsKey("force"),
-                ExtensionFilterRegex = flags.GetValueOrDefault("extension-filter"),
+                ExtensionFilter = ParseRegex(flags, "extension-filter"),
                 ExcludeExtension = flags.ContainsKey("exclude-extension"),
-                Retry = TryInt(flags.GetValueOrDefault("retry")) ?? 3,
-                RetryDelayMs = TryInt(flags.GetValueOrDefault("retry-delay")) ?? 3000,
+                Retry = Flags.Int(flags, "retry", 3, 0),
+                RetryDelayMs = Flags.Int(flags, "retry-delay", 3000, 0),
                 // Politeness delay between requests (both page fetches and file downloads) -
                 // added after we got Cloudflare-walled testing Danbooru; keeps galleries with
                 // many pages/files from hammering a site in a tight loop.
-                RequestDelayMs = TryInt(flags.GetValueOrDefault("delay")) ?? 0,
+                RequestDelayMs = Flags.Int(flags, "delay", 0, 0),
                 DedupByMd5 = flags.ContainsKey("dedup-by-md5"),
-                HtmlIndex = flags.ContainsKey("html-index"),
+                HtmlIndex = !flags.ContainsKey("no-html-index"),
             };
         }
 
@@ -440,12 +457,108 @@ namespace DanbooruDownloader.Cli
             return 0;
         }
 
+        private static int MaxPages(Dictionary<string, string> flags) => Flags.Int(flags, "max-pages", 1000, 1);
+
+        // The folder %searchtag% gives a search, so tracked and untracked downloads of a tag meet.
+        internal static string FolderForSearch(string tag) => Helper.SanitizeFilename(string.IsNullOrWhiteSpace(tag) ? "latest" : tag);
+
+        /// <summary>Counts for one run, kept outside the loops so a stopped run can still report them.</summary>
+        private sealed class Tally
+        {
+            public int Downloaded, AlreadyHad, Blacklisted, NoUrl, Filtered, Failed, Pages;
+            public long Bytes;
+            public bool LastPageFull;
+
+            public void Add(Tally other)
+            {
+                Downloaded += other.Downloaded;
+                AlreadyHad += other.AlreadyHad;
+                Blacklisted += other.Blacklisted;
+                NoUrl += other.NoUrl;
+                Filtered += other.Filtered;
+                Failed += other.Failed;
+                Pages += other.Pages;
+                Bytes += other.Bytes;
+            }
+
+            public void Print(string label, string outputDir = null)
+            {
+                var parts = new List<string> { $"{Downloaded} downloaded" + (Bytes > 0 ? $" ({Ui.Size(Bytes)})" : "") };
+                if (AlreadyHad > 0) parts.Add($"{AlreadyHad} already downloaded");
+                var skipped = new List<string>();
+                if (Blacklisted > 0) skipped.Add($"{Blacklisted} blacklisted");
+                if (Filtered > 0) skipped.Add($"{Filtered} by extension filter");
+                if (NoUrl > 0) skipped.Add($"{NoUrl} without a file URL");
+                if (skipped.Count > 0) parts.Add("skipped " + string.Join(", ", skipped));
+                parts.Add($"{Failed} failed");
+
+                var line = $"{label}: {string.Join(", ", parts)}.";
+                if (Failed > 0 || label == "Stopped") Ui.Notice(line); else Ui.Success(line);
+                if (outputDir != null && Directory.Exists(outputDir)) Ui.Line($"Folder: {Path.GetFullPath(outputDir)}");
+            }
+
+            public int ExitCode(bool stopped) => stopped ? 130 : Failed > 0 && Downloaded == 0 ? 1 : 0;
+        }
+
+        /// <summary>Runs work until it ends or Ctrl+C stops it; returns true when stopped.</summary>
+        private static async Task<bool> Stoppable(Func<Task> work)
+        {
+            try
+            {
+                await work();
+                return false;
+            }
+            catch (OperationCanceledException) when (Token.IsCancellationRequested)
+            {
+                return true;
+            }
+        }
+
         // Filename tokens that need each tag's type (artist, character, ...).
         private static readonly string[] TagTypeTokens = { "%artist%", "%copyright%", "%character%", "%circle%", "%faults%", "%general%" };
 
-        private static async Task<(int downloaded, int skipped, int failed, int alreadyKnown)> DownloadPostsAsync(
-            CliWebClient client, SqliteProvider db, DanbooruProvider provider,
-            List<DanbooruPost> posts, DownloadOptions opts)
+        // Danbooru 2 and e621 send tag categories with every post (see DanbooruJsonParser).
+        private static bool SendsTagTypes(DanbooruProvider provider) =>
+            provider.Preferred == PreferredMethod.Json && provider.QueryStringJson?.Contains("/posts.json") == true;
+
+        private static bool _tagListFetched;
+
+        /// <summary>
+        /// Gives %artist%-style tokens real names: Gelbooru by looking up this page's tags,
+        /// other boards without tag types by fetching the tag list once into tags.xml.
+        /// </summary>
+        private static async Task ResolveTagNamesAsync(CliWebClient client, SqliteProvider db, DanbooruProvider provider, List<DanbooruPost> posts, DownloadOptions opts)
+        {
+            if (!TagTypeTokens.Any(opts.FilenameFormatStr.Contains) || SendsTagTypes(provider)) return;
+            try
+            {
+                if (provider.BoardType == BoardType.Gelbooru)
+                {
+                    // Only posts that will be downloaded need names.
+                    var toName = posts.Where(p => !p.Hidden && !string.IsNullOrWhiteSpace(p.FileUrl)
+                        && (opts.Force || db.GetDownloadedFileByProviderAndPostId(provider.Name, p.Id).Count == 0)).ToList();
+                    await Tags.TagDownloader.ResolveTagTypesAsync(client, provider, toName, EffectiveDelayMs(opts, provider));
+                }
+                else if (!_tagListFetched && !Helper.IsTagsXmlExist())
+                {
+                    // ponytail: one tags.xml for all boards; a second board's names need "danboo tags download".
+                    _tagListFetched = true;
+                    Ui.Line($"The filename format needs tag types; downloading {provider.Name}'s tag list once (danboo tags download)...");
+                    var tags = await Tags.TagDownloader.DownloadAsync(client, provider, 100, 50, EffectiveDelayMs(opts, provider), Logger.Debug);
+                    DanbooruTagsDao.Save(AppPaths.TagsXml, tags);
+                    DanbooruTagsDao.Instance = new DanbooruTagsDao(AppPaths.TagsXml);
+                    foreach (var post in posts) post.TagsEntity = Helper.ParseTags(post.Tags, provider);
+                    Ui.Line($"Saved {tags.Count} tags to {AppPaths.TagsXml}.");
+                }
+            }
+            catch (Exception ex) when (!Token.IsCancellationRequested)
+            {
+                // Filenames then fall back to tags.xml or the "no tag" values.
+                Logger.Warn($"Tag type lookup on {provider.Name} failed: {ex.Message}");
+            }
+        }
+
+        private static async Task DownloadPostsAsync(CliWebClient client, SqliteProvider db, DanbooruProvider provider, List<DanbooruPost> posts, DownloadOptions opts, Tally tally)
         {
             var filenameFormat = new DanbooruFilenameFormat
             {
@@ -453,53 +566,39 @@ namespace DanbooruDownloader.Cli
                 FilenameFormat = opts.FilenameFormatStr,
             };
 
-            Regex extFilter = string.IsNullOrWhiteSpace(opts.ExtensionFilterRegex) ? null : new Regex(opts.ExtensionFilterRegex, RegexOptions.IgnoreCase);
+            await ResolveTagNamesAsync(client, db, provider, posts, opts);
 
-            int downloaded = 0, skipped = 0, failed = 0, alreadyKnown = 0;
-
-            if (provider.BoardType == BoardType.Gelbooru && TagTypeTokens.Any(opts.FilenameFormatStr.Contains))
+            int requests = 0;
+            for (int i = 0; i < posts.Count; i++)
             {
-                // Only posts that will be downloaded need names.
-                var toName = posts.Where(p => !p.Hidden && !string.IsNullOrWhiteSpace(p.FileUrl)
-                    && (opts.Force || db.GetDownloadedFileByProviderAndPostId(provider.Name, p.Id).Count == 0)).ToList();
-                try
+                Token.ThrowIfCancellationRequested();
+                var post = posts[i];
+                var prefix = $"[{(i + 1).ToString().PadLeft(posts.Count.ToString().Length)}/{posts.Count}] {post.Id}";
+                void Skip(string reason)
                 {
-                    await DanbooruDownloader.Cli.Tags.TagDownloader.ResolveTagTypesAsync(client, provider, toName, EffectiveDelayMs(opts, provider));
+                    if (Logger.Verbose) Ui.Dim($"{prefix}  skipped: {reason}");
                 }
-                catch (Exception ex)
-                {
-                    // Filenames then fall back to tags.xml or the "no tag" values.
-                    Logger.Warn($"Tag type lookup on {provider.Name} failed: {ex.Message}");
-                }
-            }
 
-            foreach (var post in posts)
-            {
                 if (post.Hidden)
                 {
-                    Console.WriteLine($"[{provider.Name}:{post.Id}] skipped (blacklisted tag)");
-                    skipped++;
+                    tally.Blacklisted++;
+                    Skip("blacklisted tag");
                     continue;
                 }
 
                 if (string.IsNullOrWhiteSpace(post.FileUrl))
                 {
-                    Console.WriteLine($"[{provider.Name}:{post.Id}] skipped (no file url)");
-                    skipped++;
+                    tally.NoUrl++;
+                    Skip("no file URL");
                     continue;
                 }
 
                 var extension = GetExtension(post.FileUrl);
-                if (extFilter != null)
+                if (opts.ExtensionFilter != null && opts.ExtensionFilter.IsMatch(extension) == opts.ExcludeExtension)
                 {
-                    var isMatch = extFilter.IsMatch(extension);
-                    var shouldSkip = opts.ExcludeExtension ? isMatch : !isMatch;
-                    if (shouldSkip)
-                    {
-                        Console.WriteLine($"[{provider.Name}:{post.Id}] skipped (extension filter: {extension})");
-                        skipped++;
-                        continue;
-                    }
+                    tally.Filtered++;
+                    Skip($"extension filter ({extension})");
+                    continue;
                 }
 
                 if (!opts.Force)
@@ -507,9 +606,8 @@ namespace DanbooruDownloader.Cli
                     var existing = db.GetDownloadedFileByProviderAndPostId(provider.Name, post.Id);
                     if (existing.Count > 0)
                     {
-                        Console.WriteLine($"[{provider.Name}:{post.Id}] skipped (already downloaded: {existing[0].Path})");
-                        skipped++;
-                        alreadyKnown++;
+                        tally.AlreadyHad++;
+                        Skip($"already downloaded: {existing[0].Path}");
                         continue;
                     }
 
@@ -518,9 +616,8 @@ namespace DanbooruDownloader.Cli
                         var elsewhere = db.GetDownloadedFileByMd5(post.MD5);
                         if (elsewhere != null)
                         {
-                            Console.WriteLine($"[{provider.Name}:{post.Id}] skipped (same image already downloaded via [{elsewhere.ProviderName}:{elsewhere.PostId}]: {elsewhere.Path})");
-                            skipped++;
-                            alreadyKnown++;
+                            tally.AlreadyHad++;
+                            Skip($"same image already downloaded from {elsewhere.ProviderName} #{elsewhere.PostId}: {elsewhere.Path}");
                             continue;
                         }
                     }
@@ -539,78 +636,77 @@ namespace DanbooruDownloader.Cli
 
                 if (!opts.Force && File.Exists(fullPath))
                 {
-                    Console.WriteLine($"[{provider.Name}:{post.Id}] skipped (file already exists on disk: {fullPath})");
                     db.Insert(provider.Name, post.Id, Path.GetFileName(fullPath), fullPath, post.MD5);
-                    skipped++;
-                    alreadyKnown++;
+                    tally.AlreadyHad++;
+                    Skip($"file already on disk: {fullPath}");
                     continue;
                 }
 
                 var effectiveDelayMs = EffectiveDelayMs(opts, provider);
-                if (effectiveDelayMs > 0 && downloaded + failed > 0)
+                if (effectiveDelayMs > 0 && requests > 0)
                 {
-                    await Task.Delay(effectiveDelayMs);
+                    await Task.Delay(effectiveDelayMs, Token);
                 }
+                requests++;
 
                 Exception lastError = null;
-                bool success = false;
+                long bytes = -1;
                 for (int attempt = 0; attempt <= opts.Retry; attempt++)
                 {
                     try
                     {
-                        await client.DownloadFileAsync(post.FileUrl, fullPath, referer: post.Referer, userAgent: provider.UserAgent);
-                        success = true;
+                        bytes = await client.DownloadFileAsync(post.FileUrl, fullPath, referer: post.Referer, userAgent: provider.UserAgent);
                         break;
                     }
                     catch (Exception ex)
                     {
+                        Token.ThrowIfCancellationRequested();
                         lastError = ex;
                         if (attempt < opts.Retry)
                         {
-                            Logger.Warn($"[{provider.Name}:{post.Id}] download failed ({ex.Message}), retrying ({attempt + 1}/{opts.Retry})...");
-                            await Task.Delay(opts.RetryDelayMs);
+                            Logger.Warn($"{post.Id}: download failed ({ex.Message}), retrying ({attempt + 1}/{opts.Retry})...");
+                            await Task.Delay(opts.RetryDelayMs, Token);
                         }
                     }
                 }
 
-                if (success)
+                if (bytes >= 0)
                 {
                     db.Insert(provider.Name, post.Id, Path.GetFileName(fullPath), fullPath, post.MD5);
-                    Console.WriteLine($"[{provider.Name}:{post.Id}] downloaded -> {fullPath}");
-                    downloaded++;
+                    tally.Downloaded++;
+                    tally.Bytes += bytes;
+                    var head = $"{prefix}  {Ui.Size(bytes),8}  ";
+                    Ui.Line(head + Ui.Fit(Path.GetRelativePath(opts.OutputDir, fullPath), Ui.Width - head.Length));
                 }
                 else
                 {
-                    Console.Error.WriteLine($"[{provider.Name}:{post.Id}] failed after {opts.Retry} retries: {lastError?.Message}");
-                    failed++;
+                    tally.Failed++;
+                    Ui.Error($"{prefix}  failed: {lastError?.Message}");
                 }
             }
-
-            return (downloaded, skipped, failed, alreadyKnown);
         }
 
         /// <summary>
-        /// Page through a provider's search results starting at --page (default: the board's
-        /// first page), downloading each page, until a page comes back empty (end of gallery).
-        /// With stopWhenCaughtUp (artist refresh only), also stop at the first page that needed
-        /// no new downloads - the newest-first ordering means everything older is already
-        /// there. Full grabs (artist add, --all-pages) must not stop early: an interrupted or
-        /// partial earlier run leaves known posts on page 1 but gaps further back.
+        /// Page through a provider's search results starting at --page (default: the first
+        /// page), downloading each page, until a page comes back empty (end of gallery) or
+        /// maxPages is reached. With stopWhenCaughtUp (artist refresh only), also stop at the
+        /// first page that needed no new downloads - the newest-first ordering means
+        /// everything older is already there. Full grabs (artist add, --all-pages) must not
+        /// stop early: an interrupted or partial earlier run leaves known posts on page 1 but
+        /// gaps further back.
         /// </summary>
-        private static async Task<(int downloaded, int skipped, int failed, int pages)> DownloadGalleryAsync(
+        private static async Task DownloadGalleryAsync(
             CliWebClient client, SqliteProvider db, DanbooruProvider provider,
-            string tag, Dictionary<string, string> flags, DownloadOptions opts, int maxPages, bool stopWhenCaughtUp = false)
+            string tag, Dictionary<string, string> flags, DownloadOptions opts, Tally tally, int maxPages, bool stopWhenCaughtUp = false)
         {
-            int totalDownloaded = 0, totalSkipped = 0, totalFailed = 0;
-            int page = TryInt(flags.GetValueOrDefault("page")) ?? PageIndexing.FirstPage(provider.BoardType);
-            int pagesFetched = 0;
+            int page = Flags.Int(flags, "page", 1, 1);
 
-            for (; pagesFetched < maxPages; pagesFetched++, page++)
+            for (int fetched = 0; fetched < maxPages; fetched++, page++)
             {
                 var effectiveDelayMs = EffectiveDelayMs(opts, provider);
-                if (effectiveDelayMs > 0 && pagesFetched > 0)
+                if (effectiveDelayMs > 0 && fetched > 0)
                 {
-                    await Task.Delay(effectiveDelayMs);
+                    await Task.Delay(effectiveDelayMs, Token);
                 }
 
                 var pageFlags = new Dictionary<string, string>(flags, StringComparer.OrdinalIgnoreCase) { ["page"] = page.ToString() };
@@ -619,70 +715,49 @@ namespace DanbooruDownloader.Cli
                 var (dao, error) = await FetchPostsWithRetry(client, provider, searchParam, opts.Retry, opts.RetryDelayMs);
                 if (error != null)
                 {
-                    Console.Error.WriteLine($"Page {page} failed: {error}");
-                    totalFailed++;
-                    break;
+                    Ui.Error($"Page {page} failed: {error}");
+                    tally.Failed++;
+                    return;
                 }
 
                 var posts = dao.Posts ?? new List<DanbooruPost>();
                 if (posts.Count == 0)
                 {
+                    if (fetched == 0) Ui.Line(page == 1 ? "No posts found." : $"Page {page} is empty.");
                     Logger.Debug($"Page {page}: empty, end of gallery.");
-                    break;
+                    return;
                 }
 
-                Console.WriteLine($"Page {page}: {posts.Count} post(s)");
-                var (downloaded, skipped, failed, alreadyKnown) = await DownloadPostsAsync(client, db, provider, posts, opts);
-                totalDownloaded += downloaded;
-                totalSkipped += skipped;
-                totalFailed += failed;
+                tally.Pages++;
+                tally.LastPageFull = posts.Count >= searchParam.Limit;
+                Ui.Heading($"Page {page}: {posts.Count} post(s)");
+
+                var (knownBefore, downloadedBefore, failedBefore) = (tally.AlreadyHad, tally.Downloaded, tally.Failed);
+                await DownloadPostsAsync(client, db, provider, posts, opts, tally);
 
                 // Filtered posts (blacklist, extension, no URL) never become "known", so judge
                 // caught-up by "nothing new was needed" rather than "every post was known".
-                if (stopWhenCaughtUp && alreadyKnown > 0 && downloaded == 0 && failed == 0)
+                if (stopWhenCaughtUp && tally.AlreadyHad > knownBefore && tally.Downloaded == downloadedBefore && tally.Failed == failedBefore)
                 {
                     Logger.Debug($"Page {page}: entirely already-downloaded, caught up.");
-                    pagesFetched++;
-                    break;
+                    return;
                 }
             }
-
-            if (opts.HtmlIndex && (totalDownloaded > 0 || !File.Exists(Path.Combine(opts.OutputDir, "index.html"))))
-            {
-                TryGenerateHtmlIndex(opts.OutputDir, provider.Name, tag);
-            }
-
-            return (totalDownloaded, totalSkipped, totalFailed, pagesFetched);
         }
 
         // ---- search ----
 
-        internal static async Task<int> RunSearch(Dictionary<string, string> flags)
+        private static async Task<int> RunSearch(Dictionary<string, string> flags)
         {
-            var providersPath = GetProvidersPath(flags);
-            var providerName = flags.GetValueOrDefault("provider");
-            if (string.IsNullOrWhiteSpace(providerName))
-            {
-                Console.Error.WriteLine("--provider is required.");
-                return 1;
-            }
-
-            var providers = LoadProviders(providersPath, out var loadError);
-            if (loadError != null) { Console.Error.WriteLine(loadError); return 1; }
-
-            var provider = FindProvider(providers, providerName);
-            if (provider == null)
-            {
-                Console.Error.WriteLine($"Provider '{providerName}' not found in {providersPath}.");
-                Console.Error.WriteLine("Available providers: " + string.Join(", ", providers.Select(p => p.Name)));
-                return 1;
-            }
-
-            var searchParam = BuildSearchParam(provider, flags.GetValueOrDefault("tags", ""), flags);
+            var providers = LoadProviders(flags);
+            var provider = RequireProvider(providers, flags.GetValueOrDefault("provider"));
+            WarnIfLoginMissing(provider);
+            var tag = flags.GetValueOrDefault("tags", "");
+            var searchParam = BuildSearchParam(provider, tag, flags);
 
             using var client = new CliWebClient(new CliConfig());
-            var (dao, error) = await FetchPostsWithRetry(client, provider, searchParam, 0, 0);
-            if (error != null) { Console.Error.WriteLine($"Error: {error}"); return 1; }
+            var (dao, error) = await FetchPostsWithRetry(client, provider, searchParam, Flags.Int(flags, "retry", 3, 0), Flags.Int(flags, "retry-delay", 3000, 0));
+            if (error != null) { Ui.Error($"Error: {error}"); return 1; }
 
             var posts = dao.Posts ?? new List<DanbooruPost>();
 
@@ -692,107 +767,79 @@ namespace DanbooruDownloader.Cli
                     posts.Select(p => new { p.Id, p.Rating, p.MD5, p.FileUrl, p.Width, p.Height, p.Tags, p.Hidden }),
                     new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
                 Console.WriteLine(json);
-            }
-            else
-            {
-                Console.WriteLine($"{posts.Count} post(s) from {provider.Name}");
-                foreach (var post in posts)
-                {
-                    var hiddenTag = post.Hidden ? " [blacklisted]" : "";
-                    Console.WriteLine($"{post.Id,10}  {post.Rating,-5}  {post.Width}x{post.Height}  {post.MD5}{hiddenTag}");
-                }
+                return 0;
             }
 
+            Ui.Heading($"{posts.Count} post(s) from {provider.Name}, page {Flags.Int(flags, "page", 1, 1)}");
+            var width = Ui.Width;
+            foreach (var post in posts)
+            {
+                var tags = post.Hidden ? "[blacklisted] " + post.Tags : post.Tags;
+                Ui.Line(Ui.Fit($"{post.Id,10}  {RatingName(post.Rating, provider),-12}  {$"{post.Width}x{post.Height}",-10}  {post.Referer}  {tags}", width));
+            }
+
+            if (posts.Count > 0)
+            {
+                var args = new List<string> { "download", "--provider", provider.Name };
+                foreach (var (key, value) in flags.Where(f => f.Key is not ("provider" or "json" or "v" or "verbose")))
+                {
+                    args.Add("--" + key);
+                    if (value != "true") args.Add(value);
+                }
+                Ui.Dim($"To download these: {Flags.ToCommandLine(args)}");
+            }
             return 0;
         }
 
         // ---- download ----
 
-        internal static async Task<int> RunDownload(Dictionary<string, string> flags)
+        private static async Task<int> RunDownload(Dictionary<string, string> flags)
         {
-            var providersPath = GetProvidersPath(flags);
-            var providerName = flags.GetValueOrDefault("provider");
-            if (string.IsNullOrWhiteSpace(providerName))
-            {
-                Console.Error.WriteLine("--provider is required.");
-                return 1;
-            }
-
-            var providers = LoadProviders(providersPath, out var loadError);
-            if (loadError != null) { Console.Error.WriteLine(loadError); return 1; }
-
-            var provider = FindProvider(providers, providerName);
-            if (provider == null)
-            {
-                Console.Error.WriteLine($"Provider '{providerName}' not found in {providersPath}.");
-                Console.Error.WriteLine("Available providers: " + string.Join(", ", providers.Select(p => p.Name)));
-                return 1;
-            }
-
+            var providers = LoadProviders(flags);
+            var provider = RequireProvider(providers, flags.GetValueOrDefault("provider"));
+            WarnIfLoginMissing(provider);
             var tag = flags.GetValueOrDefault("tags", "");
             var opts = BuildDownloadOptions(flags);
-            var dbPath = flags.GetValueOrDefault("db", "downloaded.db");
-
-            var db = new SqliteProvider(dbPath);
-            db.Create();
-
+            var db = OpenDb(flags);
             using var client = new CliWebClient(new CliConfig());
 
-            if (flags.ContainsKey("all-pages"))
+            if (flags.ContainsKey("track"))
             {
-                var maxPages = TryInt(flags.GetValueOrDefault("max-pages")) ?? 1000;
-                var (downloadedAll, skippedAll, failedAll, pages) = await DownloadGalleryAsync(client, db, provider, tag, flags, opts, maxPages);
-                Console.WriteLine($"Done. Pages: {pages}, Downloaded: {downloadedAll}, Skipped: {skippedAll}, Failed: {failedAll}");
-                return failedAll > 0 && downloadedAll == 0 ? 1 : 0;
+                return await TrackAndReport(client, db, provider, tag, Path.Combine(opts.OutputDir, FolderForSearch(tag)), flags);
             }
 
-            var searchParam = BuildSearchParam(provider, tag, flags);
-            var (dao, error) = await FetchPostsWithRetry(client, provider, searchParam, opts.Retry, opts.RetryDelayMs);
-            if (error != null) { Console.Error.WriteLine($"Error: {error}"); return 1; }
+            var allPages = flags.ContainsKey("all-pages");
+            var tally = new Tally();
+            var stopped = await Stoppable(() => DownloadGalleryAsync(client, db, provider, tag, flags, opts, tally, allPages ? MaxPages(flags) : 1));
+            WriteIndexIfNeeded(opts, $"{provider.Name} - {tag}", tally.Downloaded > 0);
 
-            var posts = dao.Posts ?? new List<DanbooruPost>();
-            Console.WriteLine($"{posts.Count} post(s) found from {provider.Name}");
-
-            var (downloaded, skipped, failed, _) = await DownloadPostsAsync(client, db, provider, posts, opts);
-            if (opts.HtmlIndex) TryGenerateHtmlIndex(opts.OutputDir, provider.Name, tag);
-
-            Console.WriteLine($"Done. Downloaded: {downloaded}, Skipped: {skipped}, Failed: {failed}");
-            return failed > 0 && downloaded == 0 ? 1 : 0;
+            tally.Print(stopped ? "Stopped" : "Done", opts.OutputDir);
+            if (!stopped && !allPages && tally.LastPageFull)
+            {
+                Ui.Dim("That was one page. Add --all-pages for every page, or --track to also keep the search up to date.");
+            }
+            return tally.ExitCode(stopped);
         }
 
         // ---- batch ----
 
-        internal static async Task<int> RunBatch(Dictionary<string, string> flags)
+        private static async Task<int> RunBatch(Dictionary<string, string> flags)
         {
             var jobsPath = flags.GetValueOrDefault("jobs");
             var providerNamesRaw = flags.GetValueOrDefault("provider-names");
             if (string.IsNullOrWhiteSpace(jobsPath) || string.IsNullOrWhiteSpace(providerNamesRaw))
             {
-                Console.Error.WriteLine("--jobs and --provider-names are required.");
-                return 1;
+                throw new UsageException("--jobs and --provider-names are required.");
             }
             if (!File.Exists(jobsPath))
             {
-                Console.Error.WriteLine($"Jobs file not found: {jobsPath}");
-                return 1;
+                throw new UsageException($"Jobs file not found: {jobsPath}");
             }
 
-            var providersPath = GetProvidersPath(flags);
-            var providers = LoadProviders(providersPath, out var loadError);
-            if (loadError != null) { Console.Error.WriteLine(loadError); return 1; }
-
-            var providerNames = providerNamesRaw.Split(',').Select(s => s.Trim()).Where(s => s.Length > 0).ToList();
-            var selectedProviders = new List<DanbooruProvider>();
-            foreach (var name in providerNames)
-            {
-                var p = FindProvider(providers, name);
-                if (p == null)
-                {
-                    Console.Error.WriteLine($"Provider '{name}' not found in {providersPath}.");
-                    return 1;
-                }
-                selectedProviders.Add(p);
-            }
+            var providers = LoadProviders(flags);
+            var selectedProviders = providerNamesRaw.Split(',').Select(s => s.Trim()).Where(s => s.Length > 0)
+                .Select(name => RequireProvider(providers, name)).ToList();
+            selectedProviders.ForEach(WarnIfLoginMissing);
 
             var jobLines = File.ReadAllLines(jobsPath)
                 .Select(l => l.Trim())
@@ -801,111 +848,99 @@ namespace DanbooruDownloader.Cli
 
             if (jobLines.Count == 0)
             {
-                Console.Error.WriteLine($"No job lines found in {jobsPath}.");
-                return 1;
+                throw new UsageException($"No job lines found in {jobsPath}.");
             }
 
             var opts = BuildDownloadOptions(flags);
-            var dbPath = flags.GetValueOrDefault("db", "downloaded.db");
-            var db = new SqliteProvider(dbPath);
-            db.Create();
-
+            var db = OpenDb(flags);
             using var client = new CliWebClient(new CliConfig());
 
-            int totalDownloaded = 0, totalSkipped = 0, totalFailed = 0, jobIndex = 0;
-            int totalJobs = jobLines.Count * selectedProviders.Count;
-            var allPages = flags.ContainsKey("all-pages");
-            var maxPages = TryInt(flags.GetValueOrDefault("max-pages")) ?? 1000;
+            var total = new Tally();
+            int totalJobs = jobLines.Count * selectedProviders.Count, jobIndex = 0;
+            var maxPages = flags.ContainsKey("all-pages") ? MaxPages(flags) : 1;
+            var track = flags.ContainsKey("track");
 
-            foreach (var tag in jobLines)
+            var stopped = await Stoppable(async () =>
             {
-                foreach (var provider in selectedProviders)
+                foreach (var tag in jobLines)
                 {
-                    jobIndex++;
-                    Console.WriteLine($"--- Job {jobIndex}/{totalJobs}: [{provider.Name}] tags=\"{tag}\" ---");
-
-                    if (allPages)
+                    foreach (var provider in selectedProviders)
                     {
-                        var (downloadedAll, skippedAll, failedAll, pages) = await DownloadGalleryAsync(client, db, provider, tag, flags, opts, maxPages);
-                        Console.WriteLine($"Pages: {pages}, Downloaded: {downloadedAll}, Skipped: {skippedAll}, Failed: {failedAll}");
-                        totalDownloaded += downloadedAll;
-                        totalSkipped += skippedAll;
-                        totalFailed += failedAll;
-                        continue;
+                        jobIndex++;
+                        Ui.Heading($"--- Job {jobIndex}/{totalJobs}: {provider.Name} \"{tag}\" ---");
+                        var job = new Tally();
+                        try
+                        {
+                            if (track) await TrackAndDownloadAsync(client, db, provider, tag, Path.Combine(opts.OutputDir, FolderForSearch(tag)), flags, job);
+                            else await DownloadGalleryAsync(client, db, provider, tag, flags, opts, job, maxPages);
+                        }
+                        finally
+                        {
+                            total.Add(job);
+                        }
+                        job.Print("Job");
                     }
-
-                    var searchParam = BuildSearchParam(provider, tag, flags);
-                    var (dao, error) = await FetchPostsWithRetry(client, provider, searchParam, opts.Retry, opts.RetryDelayMs);
-                    if (error != null)
-                    {
-                        Console.Error.WriteLine($"Job failed: {error}");
-                        totalFailed++;
-                        continue;
-                    }
-
-                    var posts = dao.Posts ?? new List<DanbooruPost>();
-                    Console.WriteLine($"{posts.Count} post(s) found");
-
-                    var (downloaded, skipped, failed, _) = await DownloadPostsAsync(client, db, provider, posts, opts);
-                    totalDownloaded += downloaded;
-                    totalSkipped += skipped;
-                    totalFailed += failed;
                 }
-            }
+            });
 
-            if (opts.HtmlIndex) TryGenerateHtmlIndex(opts.OutputDir, string.Join("+", providerNames), string.Join(" | ", jobLines));
-
-            Console.WriteLine($"Batch complete. Jobs: {totalJobs}, Downloaded: {totalDownloaded}, Skipped: {totalSkipped}, Failed: {totalFailed}");
-            return totalFailed > 0 && totalDownloaded == 0 ? 1 : 0;
+            if (!track) WriteIndexIfNeeded(opts, string.Join(" | ", jobLines), total.Downloaded > 0);
+            total.Print(stopped ? "Stopped" : $"Batch complete ({totalJobs} jobs)", opts.OutputDir);
+            return total.ExitCode(stopped);
         }
 
         // ---- providers ----
 
-        internal static async Task<int> RunProviders(string[] rest)
+        private static string LoginStatus(DanbooruProvider p) => p.LoginType switch
         {
-            var flags = ParseFlags(rest.Length > 1 ? rest[1..] : Array.Empty<string>());
-            var providersPath = GetProvidersPath(flags);
-            var providers = LoadProviders(providersPath, out var loadError);
-            if (loadError != null) { Console.Error.WriteLine(loadError); return 1; }
+            LoginType.ApiKey => LoginMissing(p) ? "API key missing" : "API key",
+            LoginType.Cookie or LoginType.CookieAlwaysAsk => LoginMissing(p) ? "cookie missing" : "cookie",
+            LoginType.UserPass => "password",
+            _ => "none",
+        };
 
-            if (rest.Length == 0 || rest[0] == "list")
+        private static async Task<int> RunProviders(string[] rest)
+        {
+            var action = rest.Length > 0 && !rest[0].StartsWith("-") ? rest[0] : "list";
+            var positionals = new List<string>();
+            var flags = Parse(rest.Length > 0 && rest[0] == action ? rest[1..] : rest, "providers=", positionals);
+            var providers = LoadProviders(flags);
+
+            switch (action)
             {
-                foreach (var p in providers)
-                {
-                    Console.WriteLine($"{p.Name,-28} {p.BoardType,-9} {p.Preferred,-5} {p.LoginType,-15} {p.Url}");
-                }
-                return 0;
+                case "list":
+                    Ui.Dim($"{"NAME",-28} {"TYPE",-9} {"LOGIN",-16} URL");
+                    foreach (var p in providers)
+                    {
+                        var line = $"{p.Name,-28} {p.BoardType,-9} {LoginStatus(p),-16} {p.Url}";
+                        if (LoginMissing(p)) Ui.Notice(line); else Ui.Line(line);
+                    }
+                    if (providers.Any(LoginMissing)) Ui.Dim("Save a missing login with: danboo login <name>");
+                    return 0;
+
+                case "show":
+                    {
+                        if (positionals.Count != 1) throw new UsageException("Usage: danboo providers show <name>");
+                        var provider = RequireProvider(providers, positionals[0]);
+                        Ui.Line($"Name:           {provider.Name}");
+                        Ui.Line($"Url:            {provider.Url}");
+                        Ui.Line($"Board type:     {provider.BoardType}");
+                        Ui.Line($"Data format:    {provider.Preferred}");
+                        Ui.Line($"Login:          {LoginStatus(provider)}");
+                        // For cookie logins UserName holds the cookie, a credential.
+                        if (provider.LoginType == LoginType.ApiKey) Ui.Line($"User:           {provider.UserName}");
+                        Ui.Line($"Default limit:  {provider.DefaultLimit}");
+                        Ui.Line($"Maximum limit:  {provider.HardLimit}");
+                        Ui.Line($"Date format:    {provider.DateTimeFormat}");
+                        return 0;
+                    }
+
+                case "check":
+                    await RunProvidersCheck(providers);
+                    return 0;
+
+                default:
+                    throw new UsageException($"Unknown providers action '{action}'. Use list, show <name> or check.");
             }
-
-            if (rest[0] == "show")
-            {
-                if (rest.Length < 2) { Console.Error.WriteLine("Usage: danboo providers show <name>"); return 1; }
-                var provider = FindProvider(providers, rest[1]);
-                if (provider == null) { Console.Error.WriteLine($"Provider '{rest[1]}' not found."); return 1; }
-
-                Console.WriteLine($"Name:          {provider.Name}");
-                Console.WriteLine($"Url:           {provider.Url}");
-                Console.WriteLine($"BoardType:     {provider.BoardType}");
-                Console.WriteLine($"Preferred:     {provider.Preferred}");
-                Console.WriteLine($"LoginType:     {provider.LoginType}");
-                // For cookie logins UserName holds the cookie, a credential.
-                var userName = provider.LoginType is LoginType.Cookie or LoginType.CookieAlwaysAsk && !string.IsNullOrEmpty(provider.UserName) ? "(cookie set)" : provider.UserName;
-                Console.WriteLine($"UserName:      {userName}");
-                Console.WriteLine($"ApiKey:        {(string.IsNullOrEmpty(provider.ApiKey) ? "(none)" : "(set)")}");
-                Console.WriteLine($"DefaultLimit:  {provider.DefaultLimit}");
-                Console.WriteLine($"HardLimit:     {provider.HardLimit}");
-                Console.WriteLine($"DateTimeFormat:{provider.DateTimeFormat}");
-                return 0;
-            }
-
-            if (rest[0] == "check")
-            {
-                await RunProvidersCheck(providers);
-                return 0;
-            }
-
-            Console.Error.WriteLine("Usage: danboo providers list|show <name>|check");
-            return 1;
         }
 
         /// <summary>
@@ -917,246 +952,258 @@ namespace DanbooruDownloader.Cli
         private static async Task RunProvidersCheck(List<DanbooruProvider> providers)
         {
             using var client = new CliWebClient(new CliConfig());
+            Ui.Dim($"{"NAME",-28} {"STATUS",-20} URL");
 
             foreach (var p in providers)
             {
                 string status;
+                bool ok = false;
                 try
                 {
                     using var stream = await client.GetStreamAsync(p.Url, userAgent: p.UserAgent);
                     using var reader = new StreamReader(stream);
                     var body = await reader.ReadToEndAsync();
 
-                    if (body.Contains(Helper.CLOUDFLARE_STR) || body.Contains(Helper.DDOS_STR))
-                        status = "Cloudflare-blocked";
-                    else
-                        status = "OK";
+                    ok = !(body.Contains(Helper.CLOUDFLARE_STR) || body.Contains(Helper.DDOS_STR));
+                    status = ok ? "OK" : "Cloudflare-blocked";
                 }
-                catch (Exception ex)
+                catch (Exception ex) when (!Token.IsCancellationRequested)
                 {
                     status = $"unreachable ({ex.Message})";
                 }
 
-                Console.WriteLine($"{p.Name,-28} {status,-20} {p.Url}");
+                var line = $"{p.Name,-28} {status,-20} {p.Url}";
+                if (ok) Ui.Line(line); else Ui.Notice(line);
             }
         }
 
         // ---- tags ----
 
-        internal static async Task<int> RunTagsDownload(Dictionary<string, string> flags)
+        private static async Task<int> RunTagsDownload(Dictionary<string, string> flags)
         {
-            var providersPath = GetProvidersPath(flags);
-            var providerName = flags.GetValueOrDefault("provider");
-            if (string.IsNullOrWhiteSpace(providerName))
-            {
-                Console.Error.WriteLine("--provider is required.");
-                return 1;
-            }
+            var providers = LoadProviders(flags);
+            var provider = RequireProvider(providers, flags.GetValueOrDefault("provider"));
 
-            var providers = LoadProviders(providersPath, out var loadError);
-            if (loadError != null) { Console.Error.WriteLine(loadError); return 1; }
-
-            var provider = FindProvider(providers, providerName);
-            if (provider == null)
+            if (SendsTagTypes(provider))
             {
-                Console.Error.WriteLine($"Provider '{providerName}' not found in {providersPath}.");
-                return 1;
-            }
-
-            // Danbooru 2 and e621 send tag categories with every post (see DanbooruJsonParser).
-            if (provider.Preferred == PreferredMethod.Json && provider.QueryStringJson?.Contains("/posts.json") == true)
-            {
-                Console.WriteLine($"Not needed: {provider.Name} sends tag categories with every post, so %artist%/%character%/%copyright% already resolve.");
+                Ui.Line($"Not needed: {provider.Name} sends tag categories with every post, so %artist%/%character%/%copyright% already resolve.");
                 return 0;
             }
 
-            var output = flags.GetValueOrDefault("output", "tags.xml");
+            var output = flags.GetValueOrDefault("output") ?? AppPaths.TagsXml;
             // Conservative default: a very large --limit can itself trip a site's bot
             // detection (seen live against Konachan - 1000 got Cloudflare-walled, 50-100 is fine).
-            var limitPerPage = TryInt(flags.GetValueOrDefault("limit")) ?? 100;
+            var limitPerPage = Flags.Int(flags, "limit", 100, 1);
             // This is a per-tag-type page cap (up to 4 types fetched separately), not a
             // single shared total - the generic --max-pages default of 1000 would mean up to
             // 400,000 tags/requests here, so tags download gets its own, much smaller default.
-            var maxPages = TryInt(flags.GetValueOrDefault("max-pages")) ?? 50;
-            var delayMs = EffectiveDelayMs(TryInt(flags.GetValueOrDefault("delay")) ?? 0, provider);
+            var maxPages = Flags.Int(flags, "max-pages", 50, 1);
+            var delayMs = EffectiveDelayMs(Flags.Int(flags, "delay", 0, 0), provider);
 
             using var client = new CliWebClient(new CliConfig());
             List<DanbooruTag> tags;
             try
             {
-                tags = await DanbooruDownloader.Cli.Tags.TagDownloader.DownloadAsync(client, provider, limitPerPage, maxPages, delayMs, Console.WriteLine);
+                tags = await Tags.TagDownloader.DownloadAsync(client, provider, limitPerPage, maxPages, delayMs, Console.WriteLine);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!Token.IsCancellationRequested)
             {
-                Console.Error.WriteLine($"Tag download failed: {ex.Message}");
+                Ui.Error($"Tag download failed: {ex.Message}");
                 return 1;
             }
 
             DanbooruTagsDao.Save(output, tags);
-            Console.WriteLine($"Saved {tags.Count} tags to {output}.");
+            Ui.Success($"Saved {tags.Count} tags to {output}.");
+            if (Path.GetFullPath(output) != Path.GetFullPath(AppPaths.TagsXml))
+            {
+                Logger.Warn($"Filenames use {AppPaths.TagsXml}; this file is used only if moved there.");
+            }
             return 0;
         }
 
-        // ---- cookie ----
+        // ---- login ----
 
-        internal static int RunCookie(string[] rest)
+        private static DanbooruProvider ProviderForLogin(List<string> positionals, Dictionary<string, string> flags, string usage)
         {
-            if (rest.Length < 3 || rest[0] != "set")
+            if (positionals.Count == 0) throw new UsageException(usage);
+            return RequireProvider(LoadProviders(flags), positionals[0]);
+        }
+
+        /// <summary>Asks for whichever login the site uses and saves it to .env.</summary>
+        private static int RunLogin(string[] rest)
+        {
+            var positionals = new List<string>();
+            var flags = Parse(rest, "providers=", positionals);
+            if (positionals.Count > 1) throw new UsageException("Usage: danboo login <provider>   (quote names with spaces)");
+            var provider = ProviderForLogin(positionals, flags, "Usage: danboo login <provider>");
+
+            var kind = provider.LoginType switch
             {
-                Console.Error.WriteLine("Usage: danboo cookie set <provider> <value> [--providers <path>]");
-                return 1;
-            }
-
-            var providerName = rest[1];
-            var cookieValue = rest[2];
-            var flags = ParseFlags(rest.Length > 3 ? rest[3..] : Array.Empty<string>());
-            var providersPath = GetProvidersPath(flags);
-
-            var providers = LoadProviders(providersPath, out var loadError, withEnvCredentials: false);
-            if (loadError != null) { Console.Error.WriteLine(loadError); return 1; }
-
-            var provider = FindProvider(providers, providerName);
-            if (provider == null) { Console.Error.WriteLine($"Provider '{providerName}' not found."); return 1; }
-
-            // Setting a cookie only does anything at request time if LoginType is actually
-            // Cookie - GetQueryUrl() only injects the cookie jar for that case. Previously
-            // this just warned and left the provider as-is (e.g. Anonymous), so the cookie
-            // silently never got used; since running "cookie set" is a clear signal the user
-            // wants cookie auth for this provider, switch it automatically instead.
-            if (provider.LoginType is not (LoginType.Cookie or LoginType.CookieAlwaysAsk))
+                LoginType.ApiKey => "1",
+                LoginType.Cookie or LoginType.CookieAlwaysAsk => "2",
+                _ => null,
+            };
+            if (kind == null)
             {
-                Console.WriteLine($"Note: {provider.Name} was LoginType={provider.LoginType} - switching it to Cookie so this value actually gets used.");
-                provider.LoginType = LoginType.Cookie;
+                Ui.Line($"{provider.Name} works without a login. A login can unlock more posts or higher limits.");
+                Console.Write("1) API key  2) cookie  0) cancel: ");
+                kind = Console.ReadLine()?.Trim();
             }
+            return kind switch
+            {
+                "1" => SaveApiKey(provider, null, null),
+                "2" => SaveCookie(provider, null),
+                _ => 0,
+            };
+        }
 
-            provider.UserName = cookieValue;
-            new DanbooruProviderDao().Save(providers, providersPath);
-            Console.WriteLine($"Cookie value for '{provider.Name}' saved to {providersPath}.");
-            return 0;
+        private static int RunCookie(string[] rest)
+        {
+            const string usage = "Usage: danboo cookie set <provider> [<cookie>]";
+            if (rest.Length == 0 || rest[0] != "set") throw new UsageException(usage);
+            var positionals = new List<string>();
+            var flags = Parse(rest[1..], "providers=", positionals);
+            if (positionals.Count > 2) throw new UsageException(usage);
+            return SaveCookie(ProviderForLogin(positionals, flags, usage), positionals.ElementAtOrDefault(1));
         }
 
         /// <summary>
         /// Sets API-key auth for a provider. The second value's meaning depends on the board:
         /// Danbooru-style boards want a username ("login"), Gelbooru-style boards want a
-        /// numeric account ID ("user_id") - see DanbooruProvider.GetQueryUrl(). Both are
-        /// stored in the same UserName field either way.
+        /// numeric account ID ("user_id") - see DanbooruProvider.GetQueryUrl().
         /// </summary>
-        internal static int RunApiKey(string[] rest)
+        private static int RunApiKey(string[] rest)
         {
-            if (rest.Length < 4 || rest[0] != "set")
+            const string usage = "Usage: danboo apikey set <provider> [<api-key> <username-or-user-id>]";
+            if (rest.Length == 0 || rest[0] != "set") throw new UsageException(usage);
+            var positionals = new List<string>();
+            var flags = Parse(rest[1..], "providers=", positionals);
+            if (positionals.Count is 2 or > 3) throw new UsageException(usage);
+            return SaveApiKey(ProviderForLogin(positionals, flags, usage), positionals.ElementAtOrDefault(1), positionals.ElementAtOrDefault(2));
+        }
+
+        private static int SaveApiKey(DanbooruProvider provider, string apiKey, string user)
+        {
+            var gelbooru = provider.BoardType == BoardType.Gelbooru;
+            if (string.IsNullOrWhiteSpace(apiKey))
             {
-                Console.Error.WriteLine("Usage: danboo apikey set <provider> <api-key> <username-or-user-id> [--providers <path>]");
-                return 1;
+                Ui.Dim(gelbooru
+                    ? $"Find both values at {provider.Url}/index.php?page=account&s=options under \"API Access Credentials\" (&api_key=...&user_id=...)."
+                    : $"Find the API key in your account settings at {provider.Url} (Danbooru: My Account > API Key).");
+                apiKey = Ui.ReadSecret("API key");
+            }
+            if (string.IsNullOrWhiteSpace(user))
+            {
+                Console.Write(gelbooru ? "User ID (the number after user_id=): " : "Username: ");
+                user = Console.ReadLine()?.Trim();
+            }
+            if (string.IsNullOrWhiteSpace(apiKey) || string.IsNullOrWhiteSpace(user))
+            {
+                throw new UsageException("Nothing saved: both the API key and the user are required.");
             }
 
-            var providerName = rest[1];
-            var apiKeyValue = rest[2];
-            var userValue = rest[3];
-            var flags = ParseFlags(rest.Length > 4 ? rest[4..] : Array.Empty<string>());
-            var providersPath = GetProvidersPath(flags);
+            var key = EnvFile.KeyFor(provider);
+            var path = EnvFile.Write((key + "_API_KEY", apiKey), (key + "_USER", user), (key + "_COOKIE", null));
+            Ui.Success($"API key for {provider.Name} saved to {Path.GetFullPath(path)}.");
+            return 0;
+        }
 
-            var providers = LoadProviders(providersPath, out var loadError, withEnvCredentials: false);
-            if (loadError != null) { Console.Error.WriteLine(loadError); return 1; }
-
-            var provider = FindProvider(providers, providerName);
-            if (provider == null) { Console.Error.WriteLine($"Provider '{providerName}' not found."); return 1; }
-
-            if (provider.LoginType != LoginType.ApiKey)
+        private static int SaveCookie(DanbooruProvider provider, string cookie)
+        {
+            if (string.IsNullOrWhiteSpace(cookie))
             {
-                Console.WriteLine($"Note: {provider.Name} was LoginType={provider.LoginType} - switching it to ApiKey so this value actually gets used.");
-                provider.LoginType = LoginType.ApiKey;
+                Ui.Dim($"In your browser, sign in at {provider.Url}, press F12 and open the Network tab, reload the page, " +
+                       "select the first request and copy the whole value of its \"Cookie\" request header.");
+                cookie = Ui.ReadSecret("Cookie");
             }
+            if (string.IsNullOrWhiteSpace(cookie)) throw new UsageException("Nothing saved: the cookie is empty.");
 
-            provider.ApiKey = apiKeyValue;
-            provider.UserName = userValue;
-            new DanbooruProviderDao().Save(providers, providersPath);
-            Console.WriteLine($"API key for '{provider.Name}' saved to {providersPath}.");
+            var key = EnvFile.KeyFor(provider);
+            var path = EnvFile.Write((key + "_COOKIE", cookie), (key + "_API_KEY", null), (key + "_USER", null));
+            Ui.Success($"Cookie for {provider.Name} saved to {Path.GetFullPath(path)}.");
             return 0;
         }
 
         // ---- artist (tracked gallery + refresh) ----
 
-        internal static async Task<int> RunArtist(string action, Dictionary<string, string> flags)
+        private static async Task<int> RunArtist(string[] rest)
         {
-            var dbPath = flags.GetValueOrDefault("db", "downloaded.db");
-            var db = new SqliteProvider(dbPath);
-            db.Create();
+            if (rest.Length == 0) throw new UsageException("Usage: danboo artist add|add-many|list|refresh|remove|schedule");
+            var action = rest[0];
+            var args = rest[1..];
+            var positionals = new List<string>();
 
             switch (action)
             {
                 case "add":
-                    return await RunArtistAdd(flags, db);
+                    return await RunArtistAdd(Parse(args, "provider= tags= " + DownloadSpec, positionals), positionals);
                 case "add-many":
-                    return await RunArtistAddMany(flags, db);
+                    return await RunArtistAddMany(Parse(args, "file= " + DownloadSpec));
                 case "list":
-                    return RunArtistList(db);
+                    return RunArtistList(Parse(args, "db= providers="));
                 case "remove":
-                    return RunArtistRemove(flags, db);
+                    return RunArtistRemove(Parse(args, "provider= tags= db= providers=", positionals), positionals);
                 case "refresh":
-                    return await RunArtistRefresh(flags, db);
+                    return await RunArtistRefresh(Parse(args, "provider= tags= all " + DownloadSpec, positionals), positionals);
+                case "schedule":
+                    if (args.Length == 0) throw new UsageException("Usage: danboo artist schedule install|uninstall|status");
+                    return RunArtistSchedule(args[0], Parse(args[1..], "interval-hours= db= providers="));
                 default:
-                    Console.Error.WriteLine($"Unknown artist action: {action}. Use add|add-many|list|remove|refresh.");
-                    return 1;
+                    throw new UsageException($"Unknown artist action '{action}'. Use add, add-many, list, refresh, remove or schedule.");
             }
         }
 
-        private static async Task<int> RunArtistAdd(Dictionary<string, string> flags, SqliteProvider db)
+        /// <summary>The provider and artist, from &lt;provider&gt; &lt;artist&gt; or --provider/--tags.</summary>
+        private static (string provider, string tag) ArtistTarget(Dictionary<string, string> flags, List<string> positionals)
         {
-            var providersPath = GetProvidersPath(flags);
-            var providerName = flags.GetValueOrDefault("provider");
-            var tag = flags.GetValueOrDefault("tags");
-            var outputDir = flags.GetValueOrDefault("output");
+            if (positionals.Count > 2) throw new UsageException($"Too many arguments. Quote a search with spaces: \"{string.Join(" ", positionals.Skip(1))}\"");
+            return (flags.GetValueOrDefault("provider") ?? positionals.ElementAtOrDefault(0),
+                    flags.GetValueOrDefault("tags") ?? positionals.ElementAtOrDefault(1));
+        }
 
-            if (string.IsNullOrWhiteSpace(providerName) || string.IsNullOrWhiteSpace(tag) || string.IsNullOrWhiteSpace(outputDir))
+        private static async Task<int> RunArtistAdd(Dictionary<string, string> flags, List<string> positionals)
+        {
+            var (providerName, tag) = ArtistTarget(flags, positionals);
+            if (string.IsNullOrWhiteSpace(providerName) || string.IsNullOrWhiteSpace(tag))
             {
-                Console.Error.WriteLine("Usage: danboo artist add --provider <name> --tags \"<artist>\" --output <dir> [options]");
-                return 1;
+                throw new UsageException("Usage: danboo artist add <provider> <artist> [--output <dir>]");
             }
 
-            var providers = LoadProviders(providersPath, out var loadError);
-            if (loadError != null) { Console.Error.WriteLine(loadError); return 1; }
-
-            var provider = FindProvider(providers, providerName);
-            if (provider == null)
-            {
-                Console.Error.WriteLine($"Provider '{providerName}' not found in {providersPath}.");
-                return 1;
-            }
-
+            var provider = RequireProvider(LoadProviders(flags), providerName);
+            WarnIfLoginMissing(provider);
+            var outputDir = flags.GetValueOrDefault("output") ?? Path.Combine(AppPaths.DefaultOutput, FolderForSearch(tag));
             using var client = new CliWebClient(new CliConfig());
-            return await AddOneArtist(client, db, provider, tag, outputDir, flags);
+            return await TrackAndReport(client, OpenDb(flags), provider, tag, outputDir, flags);
+        }
+
+        private static async Task<int> TrackAndReport(CliWebClient client, SqliteProvider db, DanbooruProvider provider, string tag, string outputDir, Dictionary<string, string> flags)
+        {
+            var tally = new Tally();
+            var stopped = await Stoppable(() => TrackAndDownloadAsync(client, db, provider, tag, outputDir, flags, tally));
+            tally.Print(stopped ? "Stopped" : "Done", outputDir);
+            if (stopped) Ui.Dim("The next \"danboo artist refresh\" picks up the rest of the gallery.");
+            return tally.ExitCode(stopped);
         }
 
         /// <summary>
-        /// Shared by "artist add" (single, from --flags) and "artist add-many" (bulk, from a
-        /// file) so both paths track+download identically.
+        /// Remembers the search and downloads its whole gallery into outputDir (the search's
+        /// own folder). Shared by "artist add", "artist add-many", "download --track" and
+        /// "batch --track", so all of them track and download the same way.
         /// </summary>
-        private static async Task<int> AddOneArtist(CliWebClient client, SqliteProvider db, DanbooruProvider provider, string tag, string outputDir, Dictionary<string, string> flags)
+        private static async Task TrackAndDownloadAsync(CliWebClient client, SqliteProvider db, DanbooruProvider provider, string tag, string outputDir, Dictionary<string, string> flags, Tally tally)
         {
             var opts = BuildDownloadOptions(flags);
-            opts.OutputDir = outputDir;
-            // The default format groups by %searchtag% (see BuildDownloadOptions), but here
-            // --output is already a dedicated per-artist folder - nesting by searchtag again
-            // inside it would just duplicate the folder name (e.g. downloads/sushoartworks/
-            // sushoartworks/...), so drop that prefix unless the user explicitly asked for
-            // their own format.
-            if (!flags.ContainsKey("filename-format"))
-            {
-                opts.FilenameFormatStr = "%rating% - %id% - %tags%";
-            }
-            // Tracked artists get a browsable index.html by default (no GUI grid anymore);
-            // opt out with --no-html-index.
-            opts.HtmlIndex = !flags.ContainsKey("no-html-index");
-            var maxPages = TryInt(flags.GetValueOrDefault("max-pages")) ?? 1000;
+            opts.OutputDir = Path.GetFullPath(outputDir);
+            // outputDir already belongs to this search, so do not nest by %searchtag% again.
+            if (!flags.ContainsKey("filename-format")) opts.FilenameFormatStr = TrackedFilenameFormat;
 
-            db.UpsertTrackedArtist(provider.Name, tag, outputDir, flags.GetValueOrDefault("filename-format"), flags.GetValueOrDefault("rating"));
-            Console.WriteLine($"Tracking [{provider.Name}] \"{tag}\" -> {outputDir}");
+            db.UpsertTrackedArtist(provider.Name, tag, opts.OutputDir, flags.GetValueOrDefault("filename-format"), flags.GetValueOrDefault("rating"));
+            Ui.Line($"Tracking {provider.Name} \"{tag}\" -> {opts.OutputDir}");
 
-            var (downloaded, skipped, failed, pages) = await DownloadGalleryAsync(client, db, provider, tag, flags, opts, maxPages);
-            db.TouchTrackedArtistRefreshed(provider.Name, tag);
-
-            Console.WriteLine($"Done. Pages: {pages}, Downloaded: {downloaded}, Skipped: {skipped}, Failed: {failed}");
-            return failed > 0 && downloaded == 0 ? 1 : 0;
+            await DownloadGalleryAsync(client, db, provider, tag, flags, opts, tally, MaxPages(flags));
+            WriteIndexIfNeeded(opts, $"{provider.Name} - {tag}", tally.Downloaded > 0);
+            // Only a complete walk counts as refreshed: until then, refresh walks every page.
+            if (tally.Failed == 0) db.TouchTrackedArtistRefreshed(provider.Name, tag);
         }
 
         /// <summary>
@@ -1164,25 +1211,19 @@ namespace DanbooruDownloader.Cli
         /// (or "provider,tag,output_dir,rating") line each. Blank lines and lines starting
         /// with # are skipped, matching the "batch" jobs-file convention.
         /// </summary>
-        private static async Task<int> RunArtistAddMany(Dictionary<string, string> flags, SqliteProvider db)
+        private static async Task<int> RunArtistAddMany(Dictionary<string, string> flags)
         {
             var filePath = flags.GetValueOrDefault("file");
             if (string.IsNullOrWhiteSpace(filePath))
             {
-                Console.Error.WriteLine("Usage: danboo artist add-many --file <path> [options]");
-                Console.Error.WriteLine("File format: one 'provider,tag,output_dir[,rating]' per line.");
-                return 1;
+                throw new UsageException("Usage: danboo artist add-many --file <path>   (lines of provider,artist,output_dir[,rating])");
             }
             if (!File.Exists(filePath))
             {
-                Console.Error.WriteLine($"File not found: {filePath}");
-                return 1;
+                throw new UsageException($"File not found: {filePath}");
             }
 
-            var providersPath = GetProvidersPath(flags);
-            var providers = LoadProviders(providersPath, out var loadError);
-            if (loadError != null) { Console.Error.WriteLine(loadError); return 1; }
-
+            var providers = LoadProviders(flags);
             var lines = File.ReadAllLines(filePath)
                 .Select(l => l.Trim())
                 .Where(l => l.Length > 0 && !l.StartsWith("#"))
@@ -1190,201 +1231,217 @@ namespace DanbooruDownloader.Cli
 
             if (lines.Count == 0)
             {
-                Console.Error.WriteLine($"No entries found in {filePath}.");
-                return 1;
+                throw new UsageException($"No entries found in {filePath}.");
             }
 
+            var db = OpenDb(flags);
             using var client = new CliWebClient(new CliConfig());
             int ok = 0, failed = 0;
-            var interArtistDelayMs = TryInt(flags.GetValueOrDefault("delay")) ?? 0;
+            var total = new Tally();
+            var interArtistDelayMs = Flags.Int(flags, "delay", 0, 0);
 
-            for (int i = 0; i < lines.Count; i++)
+            var stopped = await Stoppable(async () =>
             {
-                var line = lines[i];
-                var parts = line.Split(',').Select(p => p.Trim()).ToArray();
-                if (parts.Length < 3)
+                for (int i = 0; i < lines.Count; i++)
                 {
-                    Console.Error.WriteLine($"Skipping malformed line (need provider,tag,output_dir): \"{line}\"");
-                    failed++;
-                    continue;
+                    var line = lines[i];
+                    var parts = line.Split(',').Select(p => p.Trim()).ToArray();
+                    if (parts.Length < 3)
+                    {
+                        Ui.Error($"Skipping malformed line (need provider,artist,output_dir): \"{line}\"");
+                        failed++;
+                        continue;
+                    }
+
+                    var provider = FindProvider(providers, parts[0]);
+                    if (provider == null)
+                    {
+                        Ui.Error($"No single provider matches '{parts[0]}', skipping \"{line}\".");
+                        failed++;
+                        continue;
+                    }
+
+                    // --delay already spaces out requests *within* one artist's gallery walk
+                    // (DownloadGalleryAsync); this spaces out the handoff *between* artists too,
+                    // since consecutive lines are often the same provider.
+                    var effectiveInterArtistDelayMs = EffectiveDelayMs(interArtistDelayMs, provider);
+                    if (effectiveInterArtistDelayMs > 0 && i > 0)
+                    {
+                        await Task.Delay(effectiveInterArtistDelayMs, Token);
+                    }
+
+                    var lineFlags = new Dictionary<string, string>(flags, StringComparer.OrdinalIgnoreCase);
+                    if (parts.Length >= 4 && !string.IsNullOrWhiteSpace(parts[3])) lineFlags["rating"] = parts[3];
+
+                    Ui.Heading($"=== {i + 1}/{lines.Count}: {provider.Name} \"{parts[1]}\" ===");
+                    var artist = new Tally();
+                    try
+                    {
+                        await TrackAndDownloadAsync(client, db, provider, parts[1], parts[2], lineFlags, artist);
+                    }
+                    finally
+                    {
+                        total.Add(artist);
+                    }
+                    artist.Print("Artist");
+                    if (artist.ExitCode(false) == 0) ok++; else failed++;
                 }
+            });
 
-                var provider = FindProvider(providers, parts[0]);
-                if (provider == null)
-                {
-                    Console.Error.WriteLine($"Provider '{parts[0]}' not found in {providersPath}, skipping \"{line}\".");
-                    failed++;
-                    continue;
-                }
-
-                // --delay already spaces out requests *within* one artist's gallery walk
-                // (DownloadGalleryAsync); this spaces out the handoff *between* artists too,
-                // since consecutive lines are often the same provider.
-                var effectiveInterArtistDelayMs = EffectiveDelayMs(interArtistDelayMs, provider);
-                if (effectiveInterArtistDelayMs > 0 && i > 0)
-                {
-                    await Task.Delay(effectiveInterArtistDelayMs);
-                }
-
-                var lineFlags = new Dictionary<string, string>(flags, StringComparer.OrdinalIgnoreCase);
-                if (parts.Length >= 4 && !string.IsNullOrWhiteSpace(parts[3])) lineFlags["rating"] = parts[3];
-
-                Console.WriteLine($"=== [{provider.Name}] \"{parts[1]}\" -> {parts[2]} ===");
-                var result = await AddOneArtist(client, db, provider, parts[1], parts[2], lineFlags);
-                if (result == 0) ok++; else failed++;
-            }
-
-            Console.WriteLine($"add-many complete. Artists added: {ok}, Failed: {failed}");
-            return failed > 0 ? 1 : 0;
+            total.Print(stopped ? "Stopped" : $"add-many complete ({ok} added, {failed} failed)");
+            return stopped ? 130 : failed > 0 ? 1 : 0;
         }
 
-        /// <summary>
-        /// Installs/removes/checks a macOS launchd agent that periodically runs
-        /// "artist refresh --all" on its own - since a refresh command you have to remember
-        /// to run isn't actually automatic, this is the piece that makes it so.
-        /// </summary>
-        internal static int RunArtistSchedule(string action, Dictionary<string, string> flags)
+        private static int RunArtistSchedule(string action, Dictionary<string, string> flags)
         {
             switch (action)
             {
                 case "install":
                     {
-                        var intervalHours = TryInt(flags.GetValueOrDefault("interval-hours")) ?? 24;
-                        if (intervalHours < 1)
-                        {
-                            Console.Error.WriteLine("--interval-hours must be at least 1.");
-                            return 1;
-                        }
-                        var dbPath = Path.GetFullPath(flags.GetValueOrDefault("db", "downloaded.db"));
+                        var intervalHours = Flags.Int(flags, "interval-hours", 24, 1);
+                        var dbPath = Path.GetFullPath(GetDbPath(flags));
                         var providersPath = Path.GetFullPath(GetProvidersPath(flags));
-                        var (ok, message) = Scheduling.LaunchdScheduler.Install(intervalHours, dbPath, providersPath, Directory.GetCurrentDirectory());
-                        Console.WriteLine(message);
+                        var (ok, message) = Scheduling.Scheduler.Install(intervalHours, dbPath, providersPath, Directory.GetCurrentDirectory());
+                        if (ok) Ui.Success(message); else Ui.Error(message);
                         return ok ? 0 : 1;
                     }
                 case "uninstall":
                     {
-                        var (ok, message) = Scheduling.LaunchdScheduler.Uninstall();
-                        Console.WriteLine(message);
+                        var (ok, message) = Scheduling.Scheduler.Uninstall();
+                        Ui.Line(message);
                         return ok ? 0 : 1;
                     }
                 case "status":
-                    Console.WriteLine(Scheduling.LaunchdScheduler.Status());
+                    Ui.Line(Scheduling.Scheduler.Status());
                     return 0;
                 default:
-                    Console.Error.WriteLine("Usage: danboo artist schedule install|uninstall|status [--interval-hours <n>] [--db <path>] [--providers <path>]");
-                    return 1;
+                    throw new UsageException("Usage: danboo artist schedule install [--interval-hours <n>] | uninstall | status");
             }
         }
 
-        private static int RunArtistList(SqliteProvider db)
+        private static int RunArtistList(Dictionary<string, string> flags)
         {
-            var artists = db.ListTrackedArtists();
+            var artists = OpenDb(flags).ListTrackedArtists();
             if (artists.Count == 0)
             {
-                Console.WriteLine("No tracked artists yet. Use 'danboo artist add' to track one.");
+                Ui.Line("No tracked artists yet. Track one with: danboo artist add <provider> <artist>");
                 return 0;
             }
 
+            Ui.Dim($"{"PROVIDER",-28} {"ARTIST",-30} {"LAST REFRESH",-16} FOLDER");
             foreach (var a in artists)
             {
                 // SQLite CURRENT_TIMESTAMP is UTC.
-                var lastRefresh = a.LastRefreshedAt?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "never";
-                Console.WriteLine($"[{a.ProviderName}] \"{a.Tag}\" -> {a.OutputDir}  (last refreshed: {lastRefresh})");
+                var lastRefresh = a.LastRefreshedAt?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "not complete";
+                Ui.Line($"{a.ProviderName,-28} {a.Tag,-30} {lastRefresh,-16} {a.OutputDir}");
             }
             return 0;
         }
 
-        private static int RunArtistRemove(Dictionary<string, string> flags, SqliteProvider db)
+        private static int RunArtistRemove(Dictionary<string, string> flags, List<string> positionals)
         {
-            var providerName = flags.GetValueOrDefault("provider");
-            var tag = flags.GetValueOrDefault("tags");
+            var (providerName, tag) = ArtistTarget(flags, positionals);
             if (string.IsNullOrWhiteSpace(providerName) || string.IsNullOrWhiteSpace(tag))
             {
-                Console.Error.WriteLine("Usage: danboo artist remove --provider <name> --tags \"<artist>\"");
-                return 1;
+                throw new UsageException("Usage: danboo artist remove <provider> <artist>");
             }
 
-            var removed = db.RemoveTrackedArtist(providerName, tag);
-            Console.WriteLine(removed
-                ? $"Stopped tracking [{providerName}] \"{tag}\" (downloaded files are kept on disk)."
-                : $"No tracked artist found for [{providerName}] \"{tag}\".");
+            var db = OpenDb(flags);
+            var tracked = FindTracked(db, providerName, tag);
+            if (tracked == null || !db.RemoveTrackedArtist(tracked.ProviderName, tracked.Tag))
+            {
+                Ui.Error($"No tracked artist \"{tag}\" on {providerName}. \"danboo artist list\" shows them.");
+                return 1;
+            }
+            Ui.Success($"Stopped tracking {tracked.ProviderName} \"{tracked.Tag}\" (downloaded files are kept).");
             return 0;
         }
 
-        private static async Task<int> RunArtistRefresh(Dictionary<string, string> flags, SqliteProvider db)
-        {
-            var providersPath = GetProvidersPath(flags);
-            var providerName = flags.GetValueOrDefault("provider");
-            var tag = flags.GetValueOrDefault("tags");
-            var all = flags.ContainsKey("all");
+        // Tracked rows store the provider's full name; accept the same short forms as --provider.
+        private static TrackedArtist FindTracked(SqliteProvider db, string providerName, string tag) =>
+            db.ListTrackedArtists().FirstOrDefault(a => string.Equals(a.Tag, tag, StringComparison.OrdinalIgnoreCase)
+                && MatchProviders(new List<DanbooruProvider> { new DanbooruProvider { Name = a.ProviderName } }, providerName).Count == 1);
 
+        private static async Task<int> RunArtistRefresh(Dictionary<string, string> flags, List<string> positionals)
+        {
+            var (providerName, tag) = ArtistTarget(flags, positionals);
+            // No artist named: refresh all of them.
+            var all = flags.ContainsKey("all") || (providerName == null && tag == null);
             if (!all && (string.IsNullOrWhiteSpace(providerName) || string.IsNullOrWhiteSpace(tag)))
             {
-                Console.Error.WriteLine("Usage: danboo artist refresh --provider <name> --tags \"<artist>\"  (or --all)");
-                return 1;
+                throw new UsageException("Usage: danboo artist refresh [<provider> <artist> | --all]");
             }
 
-            var providers = LoadProviders(providersPath, out var loadError);
-            if (loadError != null) { Console.Error.WriteLine(loadError); return 1; }
-
-            var targets = all ? db.ListTrackedArtists() : new List<TrackedArtist> { db.GetTrackedArtist(providerName, tag) };
+            var providers = LoadProviders(flags);
+            var dbPath = GetDbPath(flags);
+            var db = OpenDb(flags);
+            var targets = all ? db.ListTrackedArtists() : new List<TrackedArtist> { FindTracked(db, providerName, tag) };
             targets = targets.Where(t => t != null).ToList();
 
             if (targets.Count == 0)
             {
-                Console.Error.WriteLine(all ? "No tracked artists to refresh." : $"No tracked artist found for [{providerName}] \"{tag}\". Use 'danboo artist add' first.");
+                Ui.Error(all ? "No tracked artists to refresh. Track one with: danboo artist add <provider> <artist>"
+                             : $"No tracked artist \"{tag}\" on {providerName}. \"danboo artist list\" shows them.");
                 return 1;
             }
 
-            var maxPages = TryInt(flags.GetValueOrDefault("max-pages")) ?? 1000;
-            var interArtistDelayMs = TryInt(flags.GetValueOrDefault("delay")) ?? 0;
+            var maxPages = MaxPages(flags);
+            var interArtistDelayMs = Flags.Int(flags, "delay", 0, 0);
+            // Older rows hold folders relative to where "artist add" ran, which was next to the database.
+            var dbDir = Path.GetDirectoryName(Path.GetFullPath(dbPath));
             using var client = new CliWebClient(new CliConfig());
 
-            int totalDownloaded = 0, totalFailed = 0;
-            for (int i = 0; i < targets.Count; i++)
+            var total = new Tally();
+            var stopped = await Stoppable(async () =>
             {
-                var artist = targets[i];
-                var provider = FindProvider(providers, artist.ProviderName);
-                if (provider == null)
+                for (int i = 0; i < targets.Count; i++)
                 {
-                    Console.Error.WriteLine($"Provider '{artist.ProviderName}' (tracked for \"{artist.Tag}\") not found in {providersPath}, skipping.");
-                    continue;
+                    var artist = targets[i];
+                    var provider = providers.FirstOrDefault(p => string.Equals(p.Name, artist.ProviderName, StringComparison.OrdinalIgnoreCase));
+                    if (provider == null)
+                    {
+                        Ui.Error($"Provider '{artist.ProviderName}' (tracked for \"{artist.Tag}\") not found in {GetProvidersPath(flags)}, skipping.");
+                        total.Failed++;
+                        continue;
+                    }
+
+                    // Same reasoning as add-many: space out the handoff between artists, not
+                    // just requests within one artist's own gallery walk.
+                    var effectiveInterArtistDelayMs = EffectiveDelayMs(interArtistDelayMs, provider);
+                    if (effectiveInterArtistDelayMs > 0 && i > 0)
+                    {
+                        await Task.Delay(effectiveInterArtistDelayMs, Token);
+                    }
+
+                    var outputDir = Path.GetFullPath(artist.OutputDir, dbDir);
+                    Ui.Heading($"--- {i + 1}/{targets.Count}: {provider.Name} \"{artist.Tag}\" -> {outputDir} ---");
+
+                    var artistFlags = new Dictionary<string, string>(flags, StringComparer.OrdinalIgnoreCase);
+                    if (artist.Rating != null) artistFlags.TryAdd("rating", artist.Rating);
+                    if (artist.FilenameFormat != null) artistFlags.TryAdd("filename-format", artist.FilenameFormat);
+
+                    var opts = BuildDownloadOptions(artistFlags);
+                    opts.OutputDir = outputDir;
+                    if (!artistFlags.ContainsKey("filename-format")) opts.FilenameFormatStr = TrackedFilenameFormat;
+
+                    var tally = new Tally();
+                    try
+                    {
+                        // An add or refresh that never finished left gaps further back, so walk every page.
+                        await DownloadGalleryAsync(client, db, provider, artist.Tag, artistFlags, opts, tally, maxPages, stopWhenCaughtUp: artist.LastRefreshedAt != null);
+                    }
+                    finally
+                    {
+                        total.Add(tally);
+                    }
+                    WriteIndexIfNeeded(opts, $"{provider.Name} - {artist.Tag}", tally.Downloaded > 0);
+                    if (tally.Failed == 0) db.TouchTrackedArtistRefreshed(provider.Name, artist.Tag);
+                    tally.Print("Artist");
                 }
+            });
 
-                // Same reasoning as add-many: space out the handoff between artists, not
-                // just requests within one artist's own gallery walk.
-                var effectiveInterArtistDelayMs = EffectiveDelayMs(interArtistDelayMs, provider);
-                if (effectiveInterArtistDelayMs > 0 && i > 0)
-                {
-                    await Task.Delay(effectiveInterArtistDelayMs);
-                }
-
-                Console.WriteLine($"--- Refreshing [{provider.Name}] \"{artist.Tag}\" -> {artist.OutputDir} ---");
-
-                var artistFlags = new Dictionary<string, string>(flags, StringComparer.OrdinalIgnoreCase);
-                if (artist.Rating != null) artistFlags.TryAdd("rating", artist.Rating);
-                if (artist.FilenameFormat != null) artistFlags.TryAdd("filename-format", artist.FilenameFormat);
-
-                var opts = BuildDownloadOptions(artistFlags);
-                opts.OutputDir = artist.OutputDir;
-                if (!artistFlags.ContainsKey("filename-format"))
-                {
-                    // Same reasoning as AddOneArtist: --output is already this artist's own
-                    // folder, so don't also nest by %searchtag% inside it.
-                    opts.FilenameFormatStr = "%rating% - %id% - %tags%";
-                }
-                opts.HtmlIndex = !flags.ContainsKey("no-html-index");
-
-                var (downloaded, skipped, failed, pages) = await DownloadGalleryAsync(client, db, provider, artist.Tag, artistFlags, opts, maxPages, stopWhenCaughtUp: true);
-                db.TouchTrackedArtistRefreshed(provider.Name, artist.Tag);
-                totalDownloaded += downloaded;
-                totalFailed += failed;
-
-                Console.WriteLine($"Pages: {pages}, Downloaded: {downloaded}, Skipped: {skipped}, Failed: {failed}");
-            }
-
-            Console.WriteLine($"Refresh complete. Artists: {targets.Count}, New downloads: {totalDownloaded}, Failed: {totalFailed}");
-            return totalFailed > 0 && totalDownloaded == 0 ? 1 : 0;
+            total.Print(stopped ? "Stopped" : $"Refresh complete ({targets.Count} artist(s))");
+            return total.ExitCode(stopped);
         }
     }
 }

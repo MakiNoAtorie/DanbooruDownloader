@@ -10,24 +10,19 @@ namespace DanbooruDownloader.Cli
 
         public void Debug(string message)
         {
-            if (Verbose) Write("DEBUG", message);
+            if (Verbose) Ui.DimErr(message);
         }
 
-        public void Info(string message) => Write("INFO", message);
+        public void Info(string message) => Console.Error.WriteLine(message);
 
-        public void InfoFormat(string format, params object[] args) => Write("INFO", string.Format(format, args));
+        public void InfoFormat(string format, params object[] args) => Info(string.Format(format, args));
 
-        public void Warn(string message) => Write("WARN", message);
+        public void Warn(string message) => Ui.Warn($"Warning: {message}");
 
-        public void WarnFormat(string format, params object[] args) => Write("WARN", string.Format(format, args));
+        public void WarnFormat(string format, params object[] args) => Warn(string.Format(format, args));
 
-        public void Error(string message) => Write("ERROR", message);
+        public void Error(string message) => Ui.Error($"Error: {message}");
 
-        public void Error(string message, Exception ex) => Write("ERROR", $"{message}: {ex.Message}");
-
-        private static void Write(string level, string message)
-        {
-            Console.Error.WriteLine($"[{level}] {message}");
-        }
+        public void Error(string message, Exception ex) => Error($"{message}: {ex.Message}");
     }
 }

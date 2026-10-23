@@ -3,8 +3,9 @@ rem Runs the danboo CLI. No arguments (or a double-click): the interactive menu.
 rem With arguments, they go to danboo, e.g.:
 rem   run.bat search --provider danbooru --tags touhou
 rem   run.bat --help
-rem Runs inside DanbooruDownloader.Cli, so DanbooruProviderList.xml, .env, downloaded.db
-rem and downloads\ are the ones in that folder.
+rem Runs inside DanbooruDownloader.Cli: a .env, downloaded.db or downloads\ already in that
+rem folder is used; otherwise data goes to %LOCALAPPDATA%\DanbooruDownloader and images to
+rem Pictures\DanbooruDownloader ("danboo --help" shows both).
 setlocal
 cd /d "%~dp0DanbooruDownloader.Cli"
 

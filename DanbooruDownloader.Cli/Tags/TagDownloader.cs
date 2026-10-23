@@ -74,7 +74,7 @@ namespace DanbooruDownloader.Cli.Tags
                 // track "first request overall" across nested per-type loops.
                 if (delayMs > 0)
                 {
-                    await Task.Delay(delayMs);
+                    await Task.Delay(delayMs, Program.Token);
                 }
 
                 var url = provider.ApplyAuth(BuildTagUrl(provider, limitPerPage, page, type));
@@ -149,7 +149,7 @@ namespace DanbooruDownloader.Cli.Tags
             var found = new List<DanbooruTag>();
             foreach (var batch in NameBatches(pending))
             {
-                if (delayMs > 0) await Task.Delay(delayMs);
+                if (delayMs > 0) await Task.Delay(delayMs, Program.Token);
                 var url = provider.ApplyAuth($"{provider.Url}/index.php?page=dapi&s=tag&q=index&limit={MaxNamesPerRequest}&names={string.Join("%20", batch.Select(Uri.EscapeDataString))}");
                 var tags = ParseTags(await GetTagXmlAsync(client, provider, url), provider.BoardType)
                     .Where(t => !string.IsNullOrEmpty(t.Name))

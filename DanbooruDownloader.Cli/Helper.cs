@@ -91,7 +91,7 @@ namespace DanbooruDownloader.Cli
 
         public static bool IsTagsXmlExist()
         {
-            return File.Exists("tags.xml");
+            return File.Exists(Config.AppPaths.TagsXml);
         }
 
         public static bool DumpRawData(string data, string filename)
@@ -331,14 +331,27 @@ namespace DanbooruDownloader.Cli
 
         private static string LimitPathSegment(string segment, int charLimit)
         {
+            var fullLength = segment.Length;
             if (segment.Length > charLimit) segment = segment[..charLimit];
             while (Encoding.UTF8.GetByteCount(segment) > MaxSegmentUtf8Bytes) segment = segment[..^1];
             if (segment.Length > 0 && char.IsHighSurrogate(segment[^1])) segment = segment[..^1];
+            if (segment.Length < fullLength) segment = CutAtTagBoundary(segment);
             segment = segment.Trim();
             // A server-supplied tag of "." or ".." must not become a directory traversal.
             if (segment is "." or "..") return "_";
             // Windows cannot create files or folders named like devices (con, nul, com1.jpg, ...).
             return WindowsReservedName.IsMatch(segment) ? segment + "_" : segment;
+        }
+
+        /// <summary>
+        /// For a name already cut to length: drop the partial tag at the end, so names do not
+        /// end in the middle of a tag. Keeps the cut when that would remove most of the name.
+        /// </summary>
+        internal static string CutAtTagBoundary(string cut)
+        {
+            var space = cut.LastIndexOf(' ');
+            if (space > cut.Length / 2) cut = cut[..space];
+            return cut.TrimEnd(' ', '-', '.');
         }
 
         private static readonly Regex WindowsReservedName = new Regex(@"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\..*)?$", RegexOptions.IgnoreCase);

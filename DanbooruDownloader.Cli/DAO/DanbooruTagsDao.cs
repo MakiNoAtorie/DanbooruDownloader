@@ -101,7 +101,7 @@ namespace DanbooruDownloader.Cli.DAO
             {
                 if (_DefaultTagsDao == null)
                 {
-                    _DefaultTagsDao = new DanbooruTagsDao("tags.xml");
+                    _DefaultTagsDao = new DanbooruTagsDao(Config.AppPaths.TagsXml);
                 }
                 return _DefaultTagsDao;
             }
