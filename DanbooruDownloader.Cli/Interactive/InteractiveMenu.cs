@@ -103,13 +103,13 @@ namespace DanbooruDownloader.Cli.Interactive
             }
         }
 
-        /// <summary>Shows the command line, asks to start it, then runs it like typed arguments.</summary>
-        private static async Task Run(List<string> args, bool confirm = true)
+        /// <summary>Shows the command line, asks to start it, then runs it like typed arguments; returns its exit code (-1: not started).</summary>
+        private static async Task<int> Run(List<string> args, bool confirm = true)
         {
             Ui.Dim("> " + Flags.ToCommandLine(args));
-            if (confirm && !Confirm("Start", true)) return;
+            if (confirm && !Confirm("Start", true)) return -1;
             Console.WriteLine();
-            await Program.RunCommand(args.ToArray());
+            return await Program.RunCommand(args.ToArray());
         }
 
         private static List<DanbooruProvider> LoadProviders()
@@ -170,18 +170,23 @@ namespace DanbooruDownloader.Cli.Interactive
         }
 
         /// <summary>
-        /// The remembered output folder, plus the less common options only when asked for,
-        /// so a plain download stays a few Enter presses.
+        /// The output folder, plus the less common options only when asked for, so a plain
+        /// download stays a few Enter presses. A base folder is remembered for next time;
+        /// artistFolder (for "artist add") is the folder of that one artist.
         /// </summary>
-        private static void AddOptions(List<string> args, bool outputIsBaseFolder = true)
+        private static void AddOptions(List<string> args, string artistFolder = null)
         {
-            var output = _settings.LastOutput;
+            var output = artistFolder ?? _settings.LastOutput;
             if (Confirm("Change other options (folder, blacklist, filenames, delay)", false))
             {
-                if (outputIsBaseFolder)
+                if (artistFolder != null)
                 {
-                    output = Prompt("Download folder", output ?? AppPaths.DefaultOutput);
-                    _settings.LastOutput = Path.GetFullPath(output) == Path.GetFullPath(AppPaths.DefaultOutput) ? null : output;
+                    output = Prompt("Folder for this artist", artistFolder);
+                }
+                else
+                {
+                    output = Path.GetFullPath(Prompt("Download folder", output ?? AppPaths.DefaultOutput));
+                    _settings.LastOutput = output == Path.GetFullPath(AppPaths.DefaultOutput) ? null : output;
                     _settings.Save();
                 }
                 var blacklist = Prompt("Skip posts with any of these tags (comma-separated)");
@@ -194,7 +199,7 @@ namespace DanbooruDownloader.Cli.Interactive
                 if (delay != "0") args.AddRange(new[] { "--delay", delay });
                 if (!Confirm("Write a browsable index.html", true)) args.Add("--no-html-index");
             }
-            if (outputIsBaseFolder && output != null) args.AddRange(new[] { "--output", output });
+            if (output != null) args.AddRange(new[] { "--output", output });
         }
 
         // ---- actions ----
@@ -220,7 +225,7 @@ namespace DanbooruDownloader.Cli.Interactive
             var args = new List<string> { "search", "--provider", provider.Name };
             if (!string.IsNullOrWhiteSpace(tags)) args.AddRange(new[] { "--tags", tags });
             if (rating != null) args.AddRange(new[] { "--rating", rating });
-            await Run(args, confirm: false);
+            if (await Run(args, confirm: false) != 0) return;
 
             Console.WriteLine();
             var next = Choose("Download", new[] { "no" }.Concat(HowMuch).ToArray());
@@ -290,8 +295,7 @@ namespace DanbooruDownloader.Cli.Interactive
                         var args = new List<string> { "artist", "add", provider.Name, tag };
                         var rating = PickRating(provider);
                         if (rating != null) args.AddRange(new[] { "--rating", rating });
-                        if (_settings.LastOutput != null) args.AddRange(new[] { "--output", Path.Combine(_settings.LastOutput, Program.FolderForSearch(tag)) });
-                        AddOptions(args, outputIsBaseFolder: false);
+                        AddOptions(args, Path.Combine(_settings.LastOutput ?? AppPaths.DefaultOutput, Program.FolderForSearch(tag)));
                         await Run(args);
                         break;
                     }

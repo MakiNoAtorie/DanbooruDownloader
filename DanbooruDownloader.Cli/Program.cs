@@ -47,6 +47,15 @@ namespace DanbooruDownloader.Cli
             Ui.Warn("Stopping... (press Ctrl+C again to quit at once)");
         }
 
+        /// <summary>Reads input during a command; Ctrl+C there quits instead of waiting for the prompt to end.</summary>
+        internal static T WhilePrompting<T>(Func<T> read)
+        {
+            var running = _commandRunning;
+            _commandRunning = false;
+            try { return read(); }
+            finally { _commandRunning = running; }
+        }
+
         /// <summary>Runs one command line. The interactive menu calls this too, so both share parsing and checks.</summary>
         internal static async Task<int> RunCommand(string[] args)
         {
@@ -66,6 +75,12 @@ namespace DanbooruDownloader.Cli
             {
                 Ui.Warn("Stopped.");
                 return 130;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or Microsoft.Data.Sqlite.SqliteException or System.Net.Http.HttpRequestException)
+            {
+                Ui.Error($"Error: {ex.Message}");
+                Logger.Debug(ex.ToString());
+                return 1;
             }
             finally
             {
@@ -97,6 +112,8 @@ namespace DanbooruDownloader.Cli
                 return 0;
             }
 
+            if (command.StartsWith("-")) throw new UsageException($"A command comes first, e.g. danboo download {string.Join(" ", args)}");
+
             switch (command)
             {
                 case "search": return await RunSearch(Parse(rest, SearchSpec));
@@ -119,7 +136,9 @@ namespace DanbooruDownloader.Cli
         private const string FilterSpec = "rating= not-rating limit= page= blacklist= blacklist-regex= retry= retry-delay= providers=";
         private const string SearchSpec = "provider= tags= json " + FilterSpec;
         // --html-index is the old opt-in; the index is now written by default.
-        private const string DownloadSpec = FilterSpec + " output= filename-format= db= force extension-filter= exclude-extension dedup-by-md5 html-index no-html-index all-pages max-pages= delay= track";
+        private const string DownloadSpec = GallerySpec + " output= all-pages track";
+        // Options of a tracked gallery walk, whose folder and page range are fixed.
+        private const string GallerySpec = FilterSpec + " filename-format= db= force extension-filter= exclude-extension dedup-by-md5 html-index no-html-index max-pages= delay=";
 
         private static Dictionary<string, string> Parse(string[] args, string spec, List<string> positionals = null)
         {
@@ -154,15 +173,14 @@ namespace DanbooruDownloader.Cli
 
         // ---- shared: providers, search params, fetching, downloading ----
 
-        /// <param name="withEnvCredentials">False for commands that save the list back, so
-        /// secrets from .env are never written into DanbooruProviderList.xml.</param>
-        internal static List<DanbooruProvider> LoadProviders(string providersPath, out string error, bool withEnvCredentials = true)
+        /// <summary>The provider list with .env credentials applied in memory; it is never saved back.</summary>
+        internal static List<DanbooruProvider> LoadProviders(string providersPath, out string error)
         {
             error = null;
             try
             {
                 var providers = new DanbooruProviderDao().Read(providersPath);
-                if (withEnvCredentials) EnvFile.Apply(providers, EnvFile.DefaultPath);
+                EnvFile.Apply(providers, EnvFile.DefaultPath);
                 return providers;
             }
             catch (Exception ex)
@@ -212,18 +230,15 @@ namespace DanbooruDownloader.Cli
                 : $"'{name}' matches several providers: {string.Join(", ", matches.Select(p => p.Name))}. Type more of the name.");
         }
 
-        internal static bool LoginMissing(DanbooruProvider provider) => provider.LoginType switch
-        {
-            LoginType.ApiKey => string.IsNullOrEmpty(provider.ApiKey),
-            LoginType.Cookie or LoginType.CookieAlwaysAsk => string.IsNullOrEmpty(provider.UserName),
-            _ => false,
-        };
+        // Cookie logins are optional on several boards (an empty cookie means anonymous), so
+        // only a missing API key is known to fail.
+        internal static bool LoginMissing(DanbooruProvider provider) =>
+            provider.LoginType == LoginType.ApiKey && (string.IsNullOrEmpty(provider.ApiKey) || string.IsNullOrEmpty(provider.UserName));
 
         private static void WarnIfLoginMissing(DanbooruProvider provider)
         {
             if (!LoginMissing(provider)) return;
-            var kind = provider.LoginType == LoginType.ApiKey ? "an API key" : "a cookie";
-            Logger.Warn($"{provider.Name} needs {kind} and none is saved, so requests may fail. Save one with: danboo login \"{provider.Name}\"");
+            Logger.Warn($"{provider.Name} needs an API key and none is saved, so requests will likely fail. Save one with: danboo login \"{provider.Name}\"");
         }
 
         private static Regex ParseRegex(Dictionary<string, string> flags, string key)
@@ -336,15 +351,22 @@ namespace DanbooruDownloader.Cli
             {
                 try
                 {
-                    using var stream = await client.GetStreamAsync(url, userAgent: provider.UserAgent);
+                    var htmlIsData = provider.Preferred == PreferredMethod.Html || provider.BoardType == BoardType.Shimmie2;
+                    using var stream = await client.GetStreamAsync(url, userAgent: provider.UserAgent, htmlIsData: htmlIsData);
                     var dao = new DanbooruPostDao(stream, searchParam.Option, searchParam.Page);
                     if (!dao.HasError) return (dao, null);
                     lastError = dao.ErrorMessage;
                 }
-                catch (Exception ex)
+                catch (System.Net.Http.HttpRequestException ex)
                 {
                     Token.ThrowIfCancellationRequested();
                     lastError = ex.Message;
+                    if (IsPermanent(ex)) return (null, lastError);
+                }
+                catch (Exception ex)
+                {
+                    Token.ThrowIfCancellationRequested();
+                    lastError = ex is TaskCanceledException ? "the request timed out" : $"{provider.Name} sent a response that could not be read ({ex.Message})";
                 }
 
                 if (attempt < retries)
@@ -355,6 +377,10 @@ namespace DanbooruDownloader.Cli
             }
             return (null, retries == 0 ? lastError : $"Request failed after {retries} retr{(retries == 1 ? "y" : "ies")}: {lastError}");
         }
+
+        // A 4xx other than timeout or rate limit fails the same way on every retry.
+        private static bool IsPermanent(System.Net.Http.HttpRequestException ex) =>
+            ex.StatusCode is System.Net.HttpStatusCode code && (int)code is >= 400 and < 500 && (int)code is not (408 or 429);
 
         private static string GetExtension(string fileUrl)
         {
@@ -539,7 +565,8 @@ namespace DanbooruDownloader.Cli
                         && (opts.Force || db.GetDownloadedFileByProviderAndPostId(provider.Name, p.Id).Count == 0)).ToList();
                     await Tags.TagDownloader.ResolveTagTypesAsync(client, provider, toName, EffectiveDelayMs(opts, provider));
                 }
-                else if (!_tagListFetched && !Helper.IsTagsXmlExist())
+                // Older Gelbooru boards have no lookup by name either.
+                if ((provider.BoardType != BoardType.Gelbooru || !Tags.TagDownloader.SupportsNamesLookup(provider)) && !_tagListFetched && !Helper.IsTagsXmlExist())
                 {
                     // ponytail: one tags.xml for all boards; a second board's names need "danboo tags download".
                     _tagListFetched = true;
@@ -662,6 +689,7 @@ namespace DanbooruDownloader.Cli
                     {
                         Token.ThrowIfCancellationRequested();
                         lastError = ex;
+                        if (ex is System.Net.Http.HttpRequestException http && IsPermanent(http)) break;
                         if (attempt < opts.Retry)
                         {
                             Logger.Warn($"{post.Id}: download failed ({ex.Message}), retrying ({attempt + 1}/{opts.Retry})...");
@@ -893,16 +921,19 @@ namespace DanbooruDownloader.Cli
         private static string LoginStatus(DanbooruProvider p) => p.LoginType switch
         {
             LoginType.ApiKey => LoginMissing(p) ? "API key missing" : "API key",
-            LoginType.Cookie or LoginType.CookieAlwaysAsk => LoginMissing(p) ? "cookie missing" : "cookie",
+            LoginType.Cookie => string.IsNullOrEmpty(p.UserName) ? "cookie (not set)" : "cookie",
+            LoginType.CookieAlwaysAsk => "cookie (asked)",
             LoginType.UserPass => "password",
             _ => "none",
         };
 
         private static async Task<int> RunProviders(string[] rest)
         {
-            var action = rest.Length > 0 && !rest[0].StartsWith("-") ? rest[0] : "list";
             var positionals = new List<string>();
-            var flags = Parse(rest.Length > 0 && rest[0] == action ? rest[1..] : rest, "providers=", positionals);
+            var flags = Parse(rest, "providers=", positionals);
+            var action = positionals.Count > 0 ? positionals[0] : "list";
+            positionals = positionals.Skip(1).ToList();
+            if (action != "show" && positionals.Count > 0) throw new UsageException($"Unexpected argument '{positionals[0]}'.");
             var providers = LoadProviders(flags);
 
             switch (action)
@@ -1047,7 +1078,7 @@ namespace DanbooruDownloader.Cli
             {
                 Ui.Line($"{provider.Name} works without a login. A login can unlock more posts or higher limits.");
                 Console.Write("1) API key  2) cookie  0) cancel: ");
-                kind = Console.ReadLine()?.Trim();
+                kind = WhilePrompting(Console.ReadLine)?.Trim();
             }
             return kind switch
             {
@@ -1090,12 +1121,12 @@ namespace DanbooruDownloader.Cli
                 Ui.Dim(gelbooru
                     ? $"Find both values at {provider.Url}/index.php?page=account&s=options under \"API Access Credentials\" (&api_key=...&user_id=...)."
                     : $"Find the API key in your account settings at {provider.Url} (Danbooru: My Account > API Key).");
-                apiKey = Ui.ReadSecret("API key");
+                apiKey = WhilePrompting(() => Ui.ReadSecret("API key"));
             }
             if (string.IsNullOrWhiteSpace(user))
             {
                 Console.Write(gelbooru ? "User ID (the number after user_id=): " : "Username: ");
-                user = Console.ReadLine()?.Trim();
+                user = WhilePrompting(Console.ReadLine)?.Trim();
             }
             if (string.IsNullOrWhiteSpace(apiKey) || string.IsNullOrWhiteSpace(user))
             {
@@ -1114,7 +1145,7 @@ namespace DanbooruDownloader.Cli
             {
                 Ui.Dim($"In your browser, sign in at {provider.Url}, press F12 and open the Network tab, reload the page, " +
                        "select the first request and copy the whole value of its \"Cookie\" request header.");
-                cookie = Ui.ReadSecret("Cookie");
+                cookie = WhilePrompting(() => Ui.ReadSecret("Cookie"));
             }
             if (string.IsNullOrWhiteSpace(cookie)) throw new UsageException("Nothing saved: the cookie is empty.");
 
@@ -1136,18 +1167,18 @@ namespace DanbooruDownloader.Cli
             switch (action)
             {
                 case "add":
-                    return await RunArtistAdd(Parse(args, "provider= tags= " + DownloadSpec, positionals), positionals);
+                    return await RunArtistAdd(Parse(args, "provider= tags= output= " + GallerySpec, positionals), positionals);
                 case "add-many":
-                    return await RunArtistAddMany(Parse(args, "file= " + DownloadSpec));
+                    return await RunArtistAddMany(Parse(args, "file= " + GallerySpec));
                 case "list":
-                    return RunArtistList(Parse(args, "db= providers="));
+                    return RunArtistList(Parse(args, "db="));
                 case "remove":
-                    return RunArtistRemove(Parse(args, "provider= tags= db= providers=", positionals), positionals);
+                    return RunArtistRemove(Parse(args, "provider= tags= db=", positionals), positionals);
                 case "refresh":
-                    return await RunArtistRefresh(Parse(args, "provider= tags= all " + DownloadSpec, positionals), positionals);
+                    return await RunArtistRefresh(Parse(args, "provider= tags= all " + GallerySpec, positionals), positionals);
                 case "schedule":
                     if (args.Length == 0) throw new UsageException("Usage: danboo artist schedule install|uninstall|status");
-                    return RunArtistSchedule(args[0], Parse(args[1..], "interval-hours= db= providers="));
+                    return RunArtistSchedule(args[0], Parse(args[1..], args[0] == "install" ? "interval-hours= db= providers=" : ""));
                 default:
                     throw new UsageException($"Unknown artist action '{action}'. Use add, add-many, list, refresh, remove or schedule.");
             }
@@ -1198,6 +1229,7 @@ namespace DanbooruDownloader.Cli
             if (!flags.ContainsKey("filename-format")) opts.FilenameFormatStr = TrackedFilenameFormat;
 
             db.UpsertTrackedArtist(provider.Name, tag, opts.OutputDir, flags.GetValueOrDefault("filename-format"), flags.GetValueOrDefault("rating"));
+            db.MarkTrackedArtistIncomplete(provider.Name, tag);
             Ui.Line($"Tracking {provider.Name} \"{tag}\" -> {opts.OutputDir}");
 
             await DownloadGalleryAsync(client, db, provider, tag, flags, opts, tally, MaxPages(flags));
@@ -1424,6 +1456,9 @@ namespace DanbooruDownloader.Cli
                     opts.OutputDir = outputDir;
                     if (!artistFlags.ContainsKey("filename-format")) opts.FilenameFormatStr = TrackedFilenameFormat;
 
+                    // Cleared until this walk completes: a stopped or failed refresh leaves new posts
+                    // behind already-downloaded ones, so the next one must walk every page.
+                    db.MarkTrackedArtistIncomplete(provider.Name, artist.Tag);
                     var tally = new Tally();
                     try
                     {

@@ -44,7 +44,7 @@ namespace DanbooruDownloader.Cli
         }
 
         public static string Fit(string text, int width) =>
-            width <= 1 || text.Length <= width ? text : text[..(width - 1)] + "…";
+            width <= 3 || text.Length <= width ? text : text[..(width - 3)] + "...";
 
         public static string Size(long bytes) => bytes switch
         {

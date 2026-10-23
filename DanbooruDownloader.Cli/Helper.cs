@@ -96,6 +96,9 @@ namespace DanbooruDownloader.Cli
 
         public static bool DumpRawData(string data, string filename)
         {
+            // Debug aid only: without -v it would leave a file in the working folder on every failure.
+            if (!Program.Logger.Verbose) return false;
+            Program.Logger.Debug($"Saving the raw response to {Path.GetFullPath(filename)}");
             try
             {
                 using (StreamWriter output = File.CreateText(filename))

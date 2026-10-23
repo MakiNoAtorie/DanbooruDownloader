@@ -4,6 +4,8 @@ using System;
 using System.IO;
 using System.Net;
 using System.Net.Http;
+using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 
 namespace DanbooruDownloader.Cli.Net
@@ -48,22 +50,38 @@ namespace DanbooruDownloader.Cli.Net
         /// <summary>
         /// Fetch an API/listing response into memory. Only for small responses, not files.
         /// </summary>
-        public async Task<Stream> GetStreamAsync(string url, string referer = null, string userAgent = null)
+        /// <param name="htmlIsData">For HTML-scraped boards, whose error pages (e.g. Shimmie's 404 for no results) are parsed too.</param>
+        public async Task<Stream> GetStreamAsync(string url, string referer = null, string userAgent = null, bool htmlIsData = false)
         {
             using var request = CreateRequest(url, referer, userAgent);
             using var response = await _client.SendAsync(request, Program.Token);
             var body = await response.Content.ReadAsByteArrayAsync(Program.Token);
-            // A non-2xx status with a body is not thrown here: Cloudflare's challenge page and
-            // provider error pages carry the readable reason that DanbooruPostDao reports.
-            // With no body there is nothing to report but the status.
-            if (!response.IsSuccessStatusCode && body.Length == 0)
+            // A non-2xx API body (Danbooru's JSON error, Cloudflare's challenge page) carries a
+            // readable reason that DanbooruPostDao reports. Other pages (CAPTCHA, host down) do
+            // not parse, so report the status and the page title instead.
+            if (!response.IsSuccessStatusCode && !(htmlIsData && body.Length > 0) && !IsReadableError(body, response.Content.Headers.ContentType?.MediaType))
             {
-                var hint = response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden
+                var title = Regex.Match(Encoding.UTF8.GetString(body), @"<title>\s*(.*?)\s*</title>", RegexOptions.IgnoreCase | RegexOptions.Singleline).Groups[1].Value;
+                var code = (int)response.StatusCode;
+                // Cloudflare's 52x codes come without a reason phrase.
+                var reason = string.IsNullOrWhiteSpace(response.ReasonPhrase) || response.ReasonPhrase == "<none>"
+                    ? (code is >= 520 and <= 527 ? "the site's server is down or unreachable" : "")
+                    : response.ReasonPhrase;
+                // A titled page (CAPTCHA, block notice) explains itself; a bare 401/403 is usually a missing login.
+                var hint = title.Length == 0 && response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden
                     ? " - this provider may need a login: danboo login <provider>"
                     : "";
-                throw new HttpRequestException($"HTTP {(int)response.StatusCode} {response.ReasonPhrase}{hint}");
+                throw new HttpRequestException($"HTTP {code} {reason}{(title.Length > 0 ? $" ({title})" : "")}{hint}".Replace("  ", " "), null, response.StatusCode);
             }
             return new MemoryStream(body);
+        }
+
+        private static bool IsReadableError(byte[] body, string mediaType)
+        {
+            if (body.Length == 0) return false;
+            if (mediaType != null && (mediaType.Contains("json") || mediaType.Contains("xml"))) return true;
+            var text = Encoding.UTF8.GetString(body);
+            return text.Contains(Helper.CLOUDFLARE_STR) || text.Contains(Helper.DDOS_STR);
         }
 
         /// <returns>The number of bytes written.</returns>

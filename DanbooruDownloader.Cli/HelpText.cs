@@ -43,10 +43,14 @@ namespace DanbooruDownloader.Cli
 
         private static string Download => $"""
               --output <dir>         Base folder (default: {AppPaths.DefaultOutput})
-              --filename-format <f>  %token% template (default: %searchtag%/%rating% - %id% - %tags%)
               --all-pages            Download every page, not only the first
               --track                Download every page and remember the search for "artist refresh"
-              --max-pages <n>        Page cap for --all-pages and --track (default 1000)
+            {Gallery}
+            """;
+
+        private const string Gallery = """
+              --filename-format <f>  %token% template (default: %searchtag%/%rating% - %id% - %tags%)
+              --max-pages <n>        Page cap when walking every page (default 1000)
               --force                Download again even if already downloaded
               --dedup-by-md5         Also skip images already downloaded from another site
               --extension-filter <r> Only download file extensions that match this regex
@@ -118,8 +122,9 @@ namespace DanbooruDownloader.Cli
 
                 --provider and --tags still work in place of <provider> <artist>.
 
+                  --output <dir>         ("add" only) The artist's folder
                 {Filters}
-                {Download}
+                {Gallery}
                 {Common}
                 """,
             ["login"] = () => $"""

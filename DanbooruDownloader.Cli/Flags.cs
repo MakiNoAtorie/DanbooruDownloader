@@ -51,8 +51,9 @@ namespace DanbooruDownloader.Cli
                     }
                     result[key] = value;
                 }
-                else if (switches.Contains(key) && value == null)
+                else if (switches.Contains(key))
                 {
+                    if (value != null) throw new UsageException($"--{key} does not take a value.");
                     result[key] = "true";
                 }
                 else
@@ -100,6 +101,6 @@ namespace DanbooruDownloader.Cli
 
         /// <summary>Renders arguments as a command line a user can copy, e.g. into a script.</summary>
         public static string ToCommandLine(IEnumerable<string> args) =>
-            "danboo " + string.Join(" ", args.Select(a => a.Length == 0 || a.Any(c => char.IsWhiteSpace(c) || c is '"' or '(' or ')' or '&' or '|' or '*') ? $"\"{a.Replace("\"", "\\\"")}\"" : a));
+            "danboo " + string.Join(" ", args.Select(a => a.Length == 0 || a.Any(c => char.IsWhiteSpace(c) || "\"'()&|*;<>$!%`^".Contains(c)) ? $"\"{a.Replace("\"", "\\\"")}\"" : a));
     }
 }

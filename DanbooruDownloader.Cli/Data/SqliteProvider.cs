@@ -208,6 +208,19 @@ ON CONFLICT(provider_name, tag) DO UPDATE SET
             cmd.ExecuteNonQuery();
         }
 
+        /// <summary>Clears the refresh time, so an interrupted walk is redone in full next time.</summary>
+        public void MarkTrackedArtistIncomplete(string providerName, string tag)
+        {
+            using var connection = new SqliteConnection(connectionString);
+            connection.Open();
+
+            var cmd = connection.CreateCommand();
+            cmd.CommandText = "UPDATE tracked_artists SET last_refreshed_at = NULL WHERE provider_name = @provider_name AND tag = @tag";
+            cmd.Parameters.AddWithValue("@provider_name", providerName);
+            cmd.Parameters.AddWithValue("@tag", tag);
+            cmd.ExecuteNonQuery();
+        }
+
         public bool RemoveTrackedArtist(string providerName, string tag)
         {
             using var connection = new SqliteConnection(connectionString);

@@ -128,6 +128,8 @@ namespace DanbooruDownloader.Cli.Tags
         private static readonly HashSet<string> LookedUpNames = new HashSet<string>();
         private static readonly HashSet<string> NoNamesLookup = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+        public static bool SupportsNamesLookup(DanbooruProvider provider) => !NoNamesLookup.Contains(provider.Name);
+
         /// <summary>
         /// Looks up the types of these posts' Unknown tags with Gelbooru's names= tag query
         /// (verified on gelbooru.com 2026-10), so %artist%/%character%/%copyright% resolve
@@ -159,7 +161,7 @@ namespace DanbooruDownloader.Cli.Tags
                 if (tags.Any(t => !requested.Contains(t.Name)))
                 {
                     NoNamesLookup.Add(provider.Name);
-                    Program.Logger.Warn($"{provider.Name} does not support tag lookup by name; %artist%/%character%/%copyright% need tags.xml there.");
+                    Program.Logger.Warn($"{provider.Name} does not support tag lookup by name; using its tag list (tags.xml) instead.");
                     break;
                 }
                 found.AddRange(tags);

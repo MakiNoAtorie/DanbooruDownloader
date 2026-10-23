@@ -101,7 +101,7 @@
     <Url>https://gelbooru.com</Url>
     <UserName />
     <Password />
-    <LoginType>Cookie</LoginType>
+    <LoginType>ApiKey</LoginType>
     <PasswordSalt>choujin-steiner--%PASSWORD%--</PasswordSalt>
     <PasswordHash />
     <BoardType>Gelbooru</BoardType>
